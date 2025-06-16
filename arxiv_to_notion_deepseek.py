@@ -3,30 +3,30 @@ import os
 import requests
 import arxiv
 
-# ✅ 从 GitHub Actions 或本地环境变量读取密钥
+# 从 GitHub Secrets 或本地环境读取密钥
 notion_token = os.getenv("NOTION_TOKEN")
 notion_page_id = os.getenv("NOTION_PAGE_ID")
 deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
 
-# 🔍 关键词设置
+# 扩展关键词列表（覆盖 AI 药物发现多个维度）
 search_keywords = [
-    "molecular generation",                       # 分子生成
-    "structure-based molecular generation",       # 基于结构的分子生成
-    "AI drug discovery",                          # AI 药物发现
-    "protein-ligand generation",                  # 蛋白-配体生成
-    "3D molecule generation",                     # 3D 分子生成
-    "binding pocket generation",                  # 结合口袋建模
-    "protein-ligand interaction prediction",      # 蛋白配体相互作用预测
-    "target prediction using deep learning",      # 靶点预测（AI）
-    "protein structure modeling with AI",         # AI蛋白质结构建模
-    "drug-target interaction prediction",         # 药物-靶点相互作用预测
-    "AI for binding affinity prediction",         # 结合亲和力预测（AI）
-    "multi-objective optimization in drug design",# 药物设计中的多目标优化
-    "deep learning for ADMET prediction",         # ADMET 预测（AI）
-    "deep generative models for drug discovery"   # 深度生成模型用于药物设计
+    "molecular generation",
+    "structure-based molecular generation",
+    "AI drug discovery",
+    "protein-ligand generation",
+    "3D molecule generation",
+    "binding pocket generation",
+    "protein-ligand interaction prediction",
+    "target prediction using deep learning",
+    "protein structure modeling with AI",
+    "drug-target interaction prediction",
+    "AI for binding affinity prediction",
+    "multi-objective optimization in drug design",
+    "deep learning for ADMET prediction",
+    "deep generative models for drug discovery"
 ]
 
-papers_per_keyword = 2
+papers_per_keyword = 5  # 每个关键词抓取几篇论文
 
 def summarize_with_deepseek(prompt):
     headers = {
@@ -53,7 +53,9 @@ def summarize_with_deepseek(prompt):
         return f"❗ Error from DeepSeek API: {response.text}"
 
 def fetch_and_summarize_papers():
+    seen_titles = set()
     summaries = []
+
     for keyword in search_keywords:
         search = arxiv.Search(
             query=keyword,
@@ -61,7 +63,13 @@ def fetch_and_summarize_papers():
             sort_by=arxiv.SortCriterion.SubmittedDate
         )
         for result in search.results():
-            title = result.title
+            title = result.title.strip()
+
+            # 去重：跳过已经见过的标题
+            if title in seen_titles:
+                continue
+            seen_titles.add(title)
+
             abstract = result.summary
             url = result.entry_id
 
