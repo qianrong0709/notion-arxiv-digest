@@ -1,0 +1,30 @@
+name: Daily ArXiv to Notion
+
+on:
+  schedule:
+    - cron: '30 0 * * *'  # 每天 UTC 时间 00:30，对应北京时间早上 08:30
+  workflow_dispatch:     # 允许你手动点击运行
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install requests arxiv
+
+      - name: Run arxiv_to_notion_deepseek.py
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_PAGE_ID: ${{ secrets.NOTION_PAGE_ID }}
+        run: python arxiv_to_notion_deepseek.py
