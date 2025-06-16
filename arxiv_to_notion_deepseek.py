@@ -10,11 +10,20 @@ deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
 
 # 🔍 关键词设置
 search_keywords = [
-    "molecular generation",
-    "structure-based molecular generation",
-    "AI drug discovery",
-    "protein-ligand generation",
-    "3D molecule generation"
+    "molecular generation",                       # 分子生成
+    "structure-based molecular generation",       # 基于结构的分子生成
+    "AI drug discovery",                          # AI 药物发现
+    "protein-ligand generation",                  # 蛋白-配体生成
+    "3D molecule generation",                     # 3D 分子生成
+    "binding pocket generation",                  # 结合口袋建模
+    "protein-ligand interaction prediction",      # 蛋白配体相互作用预测
+    "target prediction using deep learning",      # 靶点预测（AI）
+    "protein structure modeling with AI",         # AI蛋白质结构建模
+    "drug-target interaction prediction",         # 药物-靶点相互作用预测
+    "AI for binding affinity prediction",         # 结合亲和力预测（AI）
+    "multi-objective optimization in drug design",# 药物设计中的多目标优化
+    "deep learning for ADMET prediction",         # ADMET 预测（AI）
+    "deep generative models for drug discovery"   # 深度生成模型用于药物设计
 ]
 
 papers_per_keyword = 2
