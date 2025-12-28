@@ -10,19 +10,19 @@ from notion_client import Client
 # 1. 你的 RSS 订阅源 (AIDD 方向)
 RSS_FEEDS = {
     "ArXiv (q-bio.BM)": "http://export.arxiv.org/rss/q-bio.BM",
-    "ArXiv (CS.LG - Machine Learning)": "http://export.arxiv.org/rss/cs.LG",
-    "ArXiv (CS.AI - Artificial Intelligence)": "http://export.arxiv.org/rss/cs.AI",
+    "ArXiv (CS.LG - Machine Learning)": "https://rss.arxiv.org/rss/cs.LG",
+    "ArXiv (CS.AI - Artificial Intelligence)": "http://rss.arxiv.org/rss/cs.AI",
     "ArXiv (Chem-Phys)": "http://export.arxiv.org/rss/physics.chem-ph",
+    "ArXiv(multi)": "https://rss.arxiv.org/rss/cs.ai+q-bio.NC,
     "Nature MI": "https://www.nature.com/natmachintell.rss",
     "Nature Communi": "https://www.nature.com/ncomms.rss",
     "Nature Biotech": "https://www.nature.com/nbt.rss",
-    "Nature Comp Sci": "https://www.nature.com/ncomputsci.rss",
+    "Nature Comp Sci": "https://www.nature.com/natcomputsci.rss",
     "Nature Methods": "https://www.nature.com/nmeth.rss",
-    "JCIM": "https://pubs.acs.org/action/showFeed?type=etoc&feed=rss&journalCode=jcisd8",
-    "JMC": "https://pubs.acs.org/action/showFeed?type=etoc&feed=rss&journalCode=jmcmar",
-    "Chemical Science": "https://feeds.rsc.org/rss/C0SC00000X",
-    "Digital Discovery (专门做AI化学的)": "https://feeds.rsc.org/rss/D1DD00000X",
-    "Bioinformatics (牛津)": "https://academic.oup.com/rss/site_5273/3303.xml",
+    "JCIM": "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=jcisd8",
+    "JMC": "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=jmcmar",
+    "Chemical Science": "http://feeds.rsc.org/rss/sc",
+    "Digital Discovery (专门做AI化学的)": "http://feeds.rsc.org/rss/dd",
     "science advances": "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=sciadv",
     "Science (Main)": "https://www.science.org/action/showFeed?type=etoc&feed=rss&journalCode=science"
 }
