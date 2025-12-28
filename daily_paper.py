@@ -13,7 +13,7 @@ RSS_FEEDS = {
     "ArXiv (CS.LG - Machine Learning)": "https://rss.arxiv.org/rss/cs.LG",
     "ArXiv (CS.AI - Artificial Intelligence)": "http://rss.arxiv.org/rss/cs.AI",
     "ArXiv (Chem-Phys)": "http://export.arxiv.org/rss/physics.chem-ph",
-    "ArXiv(multi)": "https://rss.arxiv.org/rss/cs.ai+q-bio.NC,
+    "ArXiv(multi)": "https://rss.arxiv.org/rss/cs.ai+q-bio.NC",
     "Nature MI": "https://www.nature.com/natmachintell.rss",
     "Nature Communi": "https://www.nature.com/ncomms.rss",
     "Nature Biotech": "https://www.nature.com/nbt.rss",
