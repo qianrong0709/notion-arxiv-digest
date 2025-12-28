@@ -10,14 +10,27 @@ from notion_client import Client
 # 1. 你的 RSS 订阅源 (AIDD 方向)
 RSS_FEEDS = {
     "ArXiv (q-bio.BM)": "http://export.arxiv.org/rss/q-bio.BM",
+    "ArXiv (CS.LG - Machine Learning)": "http://export.arxiv.org/rss/cs.LG",
+    "ArXiv (CS.AI - Artificial Intelligence)": "http://export.arxiv.org/rss/cs.AI",
+    "ArXiv (Chem-Phys)": "http://export.arxiv.org/rss/physics.chem-ph",
     "Nature MI": "https://www.nature.com/natmachintell.rss",
+    "Nature Communi": "https://www.nature.com/ncomms.rss",
+    "Nature Biotech": "https://www.nature.com/nbt.rss",
+    "Nature Comp Sci": "https://www.nature.com/ncomputsci.rss",
+    "Nature Methods": "https://www.nature.com/nmeth.rss",
     "JCIM": "https://pubs.acs.org/action/showFeed?type=etoc&feed=rss&journalCode=jcisd8",
-    "JMC": "https://pubs.acs.org/action/showFeed?type=etoc&feed=rss&journalCode=jmcmar"
+    "JMC": "https://pubs.acs.org/action/showFeed?type=etoc&feed=rss&journalCode=jmcmar",
+    "Chemical Science": "https://feeds.rsc.org/rss/C0SC00000X",
+    "Digital Discovery (专门做AI化学的)": "https://feeds.rsc.org/rss/D1DD00000X",
+    "Bioinformatics (牛津)": "https://academic.oup.com/rss/site_5273/3303.xml",
+    "science advances": "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=sciadv",
+    "Science (Main)": "https://www.science.org/action/showFeed?type=etoc&feed=rss&journalCode=science"
 }
 
 # 2. 关键词过滤 (只保留相关的)
 # 如果想看所有文章，就把下面改成: KEYWORDS = []
-KEYWORDS = ["diffusion", "generative", "docking", "molecular dynamics", "FEP", "GNN", "transformer", "drug design"]
+KEYWORDS = ["diffusion", "generative", "docking", "molecular dynamics", "BFN", "GNN", "transformer", "drug design", "molecular generation", "electron density",
+            "drug design", "structure-based", "ligand-based", "de novo design", "geometric deep learning", "equivariant", "SE(3)","binding affinity", "protein generation"]
 
 # ================= 初始化客户端 =================
 
