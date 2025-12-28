@@ -107,17 +107,41 @@ def push_to_notion(title, url, summary, source, date_str):
 
 # ================= 主程序 =================
 
+# ================= 主程序 (修复版) =================
+
 def run():
     print("🚀 开始抓取每日论文...")
-    # 获取北京时间
     tz = pytz.timezone('Asia/Shanghai')
     today = datetime.datetime.now(tz).strftime("%Y-%m-%d")
     
+    # --- 关键修改：伪装成浏览器 ---
+    HEADERS = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    }
+
     for source_name, feed_url in RSS_FEEDS.items():
-        print(f"\n📡 正在扫描: {source_name}")
+        print(f"\n📡 正在扫描: {source_name} ...", end="")
+        
         try:
-            feed = feedparser.parse(feed_url)
-            # 每次只看最新的 10 篇，防止 API 超额
+            # --- 关键修改：传入 request_headers ---
+            # 这一步是骗过 ACS 和 ArXiv 的关键
+            feed = feedparser.parse(feed_url, request_headers=HEADERS)
+            
+            # 🔍 调试信息：看看服务器返回了什么状态码
+            status = getattr(feed, 'status', 200) # 有些源可能没返回 status，默认 200
+            if status != 200:
+                print(f" [❌ 失败: 状态码 {status}]")
+                continue # 如果被墙了 (403/429)，就跳过
+            
+            entry_count = len(feed.entries)
+            print(f" [✅ 连接成功，发现 {entry_count} 篇文章]")
+
+            if entry_count == 0:
+                print("   (⚠️ 注意: 源是通的，但没有解析到文章，可能是XML格式问题或今天没更新)")
+                continue
+
+            # 每次只看最新的 10 篇
             for entry in feed.entries[:10]: 
                 title = entry.title
                 link = entry.link
@@ -126,19 +150,20 @@ def run():
                 # 1. 关键词过滤
                 text_content = (title + abstract).lower()
                 if KEYWORDS and not any(k.lower() in text_content for k in KEYWORDS):
+                    # print(f"   [过滤] {title[:20]}...") # 调试时可以取消注释
                     continue 
 
-                # 2. 查重 (如果库里有了，就跳过)
+                # 2. 查重
                 if check_if_exists(link):
-                    print(f"💨 已存在，跳过: {title[:10]}")
+                    print(f"   💨 已存在: {title[:15]}...")
                     continue
                 
-                # 3. 生成总结 & 入库
+                # 3. 总结 & 入库
                 summary = summarize_paper(title, abstract)
                 push_to_notion(title, link, summary, source_name, today)
                 
         except Exception as e:
-            print(f"⚠️ 解析 RSS 失败: {source_name}, 错误: {e}")
+            print(f"\n⚠️ 解析出错: {source_name}, 错误: {e}")
 
 if __name__ == "__main__":
     run()
