@@ -2,30 +2,55 @@ name: AIDD Paper Daily Bot
 
 on:
   schedule:
-    # 每天北京时间早上 8 点运行 (UTC 时间 0 点)
+    # 每天北京时间早上 8 点运行，也就是 UTC 时间 0 点
     - cron: '0 0 * * *'
-  workflow_dispatch: # 允许你手动点击按钮运行
+  workflow_dispatch:
 
 jobs:
   run_bot:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 20
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v2
-      
-    - name: Set up Python
-      uses: actions/setup-python@v2
-      with:
-        python-version: '3.9'
-        
-    - name: Install dependencies
-      run: pip install -r requirements.txt
-      
-    - name: Run Daily Script
-      env:
-        # 这里把 GitHub 后台设置的密码传给 Python 脚本
-        DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-        DATABASE_ID: ${{ secrets.DATABASE_ID }}
-      run: python daily_paper.py
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Check secrets
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          DATABASE_ID: ${{ secrets.DATABASE_ID }}
+        run: |
+          python - <<'PY'
+          import os
+
+          required = [
+              "DEEPSEEK_API_KEY",
+              "NOTION_TOKEN",
+              "DATABASE_ID",
+          ]
+
+          missing = [name for name in required if not os.getenv(name)]
+
+          if missing:
+              raise SystemExit(f"Missing secrets: {', '.join(missing)}")
+
+          print("✅ All required secrets exist.")
+          PY
+
+      - name: Run Daily Script
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          DATABASE_ID: ${{ secrets.DATABASE_ID }}
+        run: python daily_paper.py
