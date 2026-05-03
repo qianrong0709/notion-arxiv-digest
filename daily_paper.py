@@ -312,22 +312,28 @@ def push_to_notion(title, url, summary, source, date_str, paper_id):
 # ================= DeepSeek 总结函数 =================
 
 def summarize_paper(title, abstract):
+    """用 DeepSeek 生成克制、客观的论文摘要"""
     print(f"🤖 正在总结: {title[:60]}...")
 
     prompt = f"""
-你是 AIDD，也就是 AI 药物发现领域的博士生。请阅读下面这篇论文的标题和摘要，用中文写一段简短的“推荐语”。
+你是 AI 药物发现、计算化学和机器学习方向的博士生。请根据下面论文的标题和摘要，写一段中文摘要，供 Notion 文献数据库快速浏览使用。
 
-要求：
-1. 第一句直接说明这篇文章解决什么问题，或者核心创新点是什么。
-2. 语言自然，像科研师兄给组里同学推荐论文，不要翻译腔。
-3. 不要夸大，不要说“颠覆”“革命性”等过强表述。
-4. 100 字以内。
+写作要求：
+1. 只基于标题和摘要，不要补充摘要中没有的信息。
+2. 不要写成推荐语，不要使用“兄弟们”“太顶了”“值得一看”“重磅”“颠覆”“突破性”“厉害”等口语化或营销化表达。
+3. 不要夸大论文贡献，不要替作者下过强结论。
+4. 优先说明三点：研究问题、方法思路、主要结果或潜在用途。
+5. 如果摘要信息不足，就明确写“摘要中未提供具体实验细节”或“摘要中未说明具体性能提升”。
+6. 语言保持科研笔记风格，客观、克制、清楚。
+7. 控制在 80–120 字。
 
 标题：
 {title}
 
 摘要：
 {abstract}
+
+请直接输出摘要正文，不要加标题，不要分点。
 """
 
     try:
@@ -335,12 +341,16 @@ def summarize_paper(title, abstract):
             model="deepseek-chat",
             messages=[
                 {
+                    "role": "system",
+                    "content": "你是一个严谨的科研文献摘要助手，输出必须客观、克制、避免宣传语。"
+                },
+                {
                     "role": "user",
                     "content": prompt,
                 }
             ],
-            temperature=0.5,
-            max_tokens=300,
+            temperature=0.2,
+            max_tokens=220,
         )
 
         return response.choices[0].message.content.strip()
