@@ -3,7 +3,8 @@ name: AIDD Paper Daily Bot
 on:
   schedule:
     # 每天北京时间早上 8 点运行，也就是 UTC 时间 0 点
-    - cron: '0 0 * * *'
+    - cron: '17 8 * * *'
+      timezone: 'Asia/Shanghai'
   workflow_dispatch:
 
 jobs:
