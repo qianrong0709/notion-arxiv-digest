@@ -930,12 +930,10 @@ def run():
             entry_type = feed_info.get("type", "paper")
 
         if feed_tag in EXCLUDED_FEED_TAGS:
-            print(f"
-⏭️ 跳过来源: {source_name} [{feed_tag}]，如需启用请修改 EXCLUDED_FEED_TAGS")
+            print("\\n⏭️ 跳过来源: {} [{}]，如需启用请修改 EXCLUDED_FEED_TAGS".format(source_name, feed_tag))
             continue
 
-        print(f"
-📡 正在扫描: {source_name} [{feed_tag or '-'} / {entry_type}] ...", end="")
+        print("\\n📡 正在扫描: {} [{} / {}] ...".format(source_name, feed_tag or "-", entry_type), end="")
 
         try:
             feed = feedparser.parse(feed_url, request_headers=headers)
