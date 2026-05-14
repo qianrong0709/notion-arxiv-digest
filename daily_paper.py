@@ -16,7 +16,12 @@ from notion_client import Client
 # ============================================================
 
 TIMEZONE = "Asia/Shanghai"  # 如果你更想按日本时间入库，可改成 "Asia/Tokyo"
-MAX_ENTRIES_PER_FEED = 50
+# 高召回模式可设为 50；日常精选模式建议 20–30。
+MAX_ENTRIES_PER_FEED = 25
+
+# 默认跳过博客源，避免 OpenAI / DeepMind / HF 等动态把 Notion 塞满。
+# 如果以后想重新抓博客，把 {"blog"} 改成 set()。
+EXCLUDED_FEED_TAGS = {"blog"}
 
 # 如果 Notion 数据库里有这些字段，就填字段名；没有就保持 None。
 # 注意：字段类型必须对应，否则 Notion API 会报错。
@@ -305,135 +310,20 @@ RSS_FEEDS = {
 # type 建议：paper / blog / news
 # ============================================================
 
-
 USER_CUSTOM_RSS_FEEDS = {
-    # ============================================================
-    # Nature Reviews / Nature 系列：建议保留 AOP + current issue
-    # ============================================================
+    # "期刊或来源名称": {
+    #     "url": "https://example.com/rss.xml",
+    #     "tag": "custom",
+    #     "type": "paper",
+    # },
 
-    "Nature Reviews Chemistry": {
-        "url": "https://www.nature.com/natrevchem/current_issue/rss",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "Nature Reviews Chemistry AOP": {
-        "url": "https://www.nature.com/natrevchem/journal/vaop/ncurrent/rss.rdf",
-        "tag": "aidd",
-        "type": "paper",
-    },
-
-    "Nature Medicine": {
-        "url": "https://www.nature.com/nm/current_issue/rss",
-        "tag": "general",
-        "type": "paper",
-    },
-    "Nature Medicine AOP": {
-        "url": "https://www.nature.com/nm/journal/vaop/ncurrent/rss.rdf",
-        "tag": "general",
-        "type": "paper",
-    },
-
-    # 如果你想显式覆盖/补充 Nature Methods，也可以放这里；
-    # 但我之前给你的主 RSS_FEEDS 里已经有 Nature Methods。
-    "Nature Methods AOP": {
-        "url": "https://www.nature.com/nmeth/journal/vaop/ncurrent/rss.rdf",
-        "tag": "general",
-        "type": "paper",
-    },
-
-    # ============================================================
-    # ACS：化学、药物化学、计算化学
-    # ============================================================
-
-    "Chemical Reviews": {
-        "url": "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=chreay",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "ACS Chemical Biology": {
-        "url": "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=acbcct",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "Biochemistry": {
-        "url": "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=bichaw",
-        "tag": "aidd",
-        "type": "paper",
-    },
-
-    # JACS 很强，但非常宽。建议 tag 用 general，靠关键词过滤。
-    "JACS": {
-        "url": "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=jacsat",
-        "tag": "general",
-        "type": "paper",
-    },
-
-    # ============================================================
-    # PNAS
-    # ============================================================
-
-    # 你主脚本里已经有 PNAS。这里给的是官方 eTOC feed 的等价写法。
-    "PNAS eTOC": {
-        "url": "https://www.pnas.org/action/showFeed?feed=rss&jc=PNAS&type=etoc",
-        "tag": "general",
-        "type": "paper",
-    },
-
-    # ============================================================
-    # RSC：综述 / 药物化学
-    # ============================================================
-
-    "Chemical Society Reviews": {
-        "url": "https://feeds.rsc.org/rss/cs",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "RSC Medicinal Chemistry": {
-        "url": "https://feeds.rsc.org/rss/md",
-        "tag": "aidd",
-        "type": "paper",
-    },
-
-    # ============================================================
-    # Cell Press：化学生物 / 系统生物 / AI for biology 相关
-    # ============================================================
-
-    "Cell Chemical Biology": {
-        "url": "https://www.cell.com/cell-chemical-biology/rss",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "Cell Genomics": {
-        "url": "https://www.cell.com/cell-genomics/rss",
-        "tag": "general",
-        "type": "paper",
-    },
-    "Cell Reports Medicine": {
-        "url": "https://www.cell.com/cell-reports-medicine/rss",
-        "tag": "general",
-        "type": "paper",
-    },
-
-    # ============================================================
-    # Bioinformatics / computational biology
-    # ============================================================
-
-    "Nucleic Acids Research": {
-        "url": "https://academic.oup.com/rss/site_5153/3127.xml",
-        "tag": "aidd",
-        "type": "paper",
-    },
-
-    # Journal of Cheminformatics 的 Springer/BMC RSS 地址有时不稳定；
-    # 这个地址建议你先跑一次脚本测试 feedparser 是否能解析。
-    "Journal of Cheminformatics": {
-        "url": "https://link.springer.com/search.rss?facet-journal-id=13321&channel-name=Journal%20of%20Cheminformatics",
-        "tag": "aidd",
-        "type": "paper",
-    },
+    # 例子：
+    # "RSC Medicinal Chemistry": {
+    #     "url": "在这里粘贴 RSS 地址",
+    #     "tag": "aidd",
+    #     "type": "paper",
+    # },
 }
-
-
 
 RSS_FEEDS.update(USER_CUSTOM_RSS_FEEDS)
 
@@ -557,16 +447,20 @@ HIGH_PRIORITY_KEYWORDS_LOWER = {kw.lower() for kw in HIGH_PRIORITY_KEYWORDS}
 
 # 不同来源类型的最低分。
 # general/blog 源阈值更高，是为了减少综合大刊和博客的噪声。
+# 日常精选模式：
+# - aidd 稍微宽松，因为这是主方向；
+# - ml/nlp/cv/agent 提高门槛，避免泛 AI 文章过多；
+# - general/blog 最严格，因为综合大刊和博客噪声最大。
 MIN_SCORE_BY_TAG = {
-    "aidd": 1,
-    "ml": 1,
-    "nlp": 1,
-    "cv": 1,
-    "agent": 1,
-    "general": 3,
-    "blog": 3,
-    "custom": 1,
-    None: 1,
+    "aidd": 3,
+    "ml": 5,
+    "nlp": 5,
+    "cv": 5,
+    "agent": 5,
+    "general": 7,
+    "blog": 7,
+    "custom": 4,
+    None: 4,
 }
 
 
@@ -1035,7 +929,13 @@ def run():
             feed_tag = feed_info.get("tag")
             entry_type = feed_info.get("type", "paper")
 
-        print(f"\n📡 正在扫描: {source_name} [{feed_tag or '-'} / {entry_type}] ...", end="")
+        if feed_tag in EXCLUDED_FEED_TAGS:
+            print(f"
+⏭️ 跳过来源: {source_name} [{feed_tag}]，如需启用请修改 EXCLUDED_FEED_TAGS")
+            continue
+
+        print(f"
+📡 正在扫描: {source_name} [{feed_tag or '-'} / {entry_type}] ...", end="")
 
         try:
             feed = feedparser.parse(feed_url, request_headers=headers)
