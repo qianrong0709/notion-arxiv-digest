@@ -5,7 +5,10 @@ import pytz
 import re
 import hashlib
 import html
-from urllib.parse import urlparse, urlunparse
+import json
+import time
+from urllib.parse import urlparse, urlunparse, urlencode
+from urllib.request import Request, urlopen
 
 from openai import OpenAI
 from notion_client import Client
@@ -15,20 +18,33 @@ from notion_client import Client
 # 配置区域
 # ============================================================
 
-TIMEZONE = "Asia/Shanghai"  # 如果你更想按日本时间入库，可改成 "Asia/Tokyo"
-# 高召回模式可设为 50；日常精选模式建议 20–30。
-MAX_ENTRIES_PER_FEED = 25
+TIMEZONE = "Asia/Shanghai"
+
+# 日常精选模式：不要太高，否则 arXiv 每天会进太多。
+# 如果某天想高召回，可以临时改成 25 或 50。
+MAX_ENTRIES_PER_FEED = 15
+MAX_ENTRIES_PER_API_SOURCE = 15
 
 # 默认跳过博客源，避免 OpenAI / DeepMind / HF 等动态把 Notion 塞满。
-# 如果以后想重新抓博客，把 {"blog"} 改成 set()。
 EXCLUDED_FEED_TAGS = {"blog"}
 
+# 默认关闭的一些 arXiv 边缘源。
+# 这些源目前没有放进 RSS_FEEDS；保留此项是为了以后重新加入时可直接控制。
+EXCLUDED_FEED_NAMES = {
+    "ArXiv q-bio.MN - Molecular Networks",
+    "ArXiv cond-mat.soft - Soft Matter",
+    "ArXiv cs.NE - Neural and Evolutionary Computing",
+    "ArXiv eess.IV - Image and Video Processing",
+    "ArXiv cs.RO - Robotics",
+    "ArXiv cs.HC - Human-Computer Interaction",
+}
+
 # 如果 Notion 数据库里有这些字段，就填字段名；没有就保持 None。
-# 注意：字段类型必须对应，否则 Notion API 会报错。
-NOTION_TAG_PROPERTY = None              # 例："Tags"，multi_select，用于写入来源分组 aidd/ml/nlp/cv/agent/general/blog/custom
-NOTION_TOPIC_PROPERTY = None            # 例："Topics"，multi_select，用于写入关键词命中的主题组
-NOTION_SCORE_PROPERTY = None            # 例："Score"，number，用于写入相关性分数
-NOTION_ENTRY_TYPE_PROPERTY = None       # 例："Type"，select，用于写入 paper/blog/news
+# 字段类型必须对应，否则 Notion API 会报错。
+NOTION_TAG_PROPERTY = None              # 例："Tags"，multi_select
+NOTION_TOPIC_PROPERTY = None            # 例："Topics"，multi_select
+NOTION_SCORE_PROPERTY = None            # 例："Score"，number
+NOTION_ENTRY_TYPE_PROPERTY = None       # 例："Type"，select
 
 
 # ============================================================
@@ -36,12 +52,12 @@ NOTION_ENTRY_TYPE_PROPERTY = None       # 例："Type"，select，用于写入 p
 # 结构说明：
 #   key: 你想在 Notion Source 字段里显示的来源名
 #   url: RSS 地址
-#   tag: 来源大类，用于筛选策略与可选 Notion 标签
+#   tag: 来源大类：aidd / ml / nlp / cv / agent / general / blog / custom
 #   type: paper / blog / news
 # ============================================================
 
 RSS_FEEDS = {
-    # ================= AIDD / 计算化学 / 结构生物 =================
+    # ================= arXiv：AIDD / 计算化学 / 生物分子 =================
     "ArXiv q-bio.BM - Biomolecules": {
         "url": "https://rss.arxiv.org/rss/q-bio.BM",
         "tag": "aidd",
@@ -52,21 +68,47 @@ RSS_FEEDS = {
         "tag": "aidd",
         "type": "paper",
     },
-    "ArXiv q-bio.MN - Molecular Networks": {
-        "url": "https://rss.arxiv.org/rss/q-bio.MN",
-        "tag": "aidd",
-        "type": "paper",
-    },
     "ArXiv physics.chem-ph - Chemical Physics": {
         "url": "https://rss.arxiv.org/rss/physics.chem-ph",
         "tag": "aidd",
         "type": "paper",
     },
-    "ArXiv cond-mat.soft - Soft Matter": {
-        "url": "https://rss.arxiv.org/rss/cond-mat.soft",
-        "tag": "aidd",
+
+    # ================= arXiv：核心 AI / ML =================
+    "ArXiv cs.LG - Machine Learning": {
+        "url": "https://rss.arxiv.org/rss/cs.LG",
+        "tag": "ml",
         "type": "paper",
     },
+    "ArXiv cs.AI - Artificial Intelligence": {
+        "url": "https://rss.arxiv.org/rss/cs.AI",
+        "tag": "ml",
+        "type": "paper",
+    },
+    "ArXiv stat.ML - Statistical ML": {
+        "url": "https://rss.arxiv.org/rss/stat.ML",
+        "tag": "ml",
+        "type": "paper",
+    },
+
+    # ================= arXiv：NLP / CV / Agent 核心源 =================
+    "ArXiv cs.CL - NLP": {
+        "url": "https://rss.arxiv.org/rss/cs.CL",
+        "tag": "nlp",
+        "type": "paper",
+    },
+    "ArXiv cs.CV - Computer Vision": {
+        "url": "https://rss.arxiv.org/rss/cs.CV",
+        "tag": "cv",
+        "type": "paper",
+    },
+    "ArXiv cs.MA - Multiagent Systems": {
+        "url": "https://rss.arxiv.org/rss/cs.MA",
+        "tag": "agent",
+        "type": "paper",
+    },
+
+    # ================= AIDD / 计算化学 / 药物化学期刊 =================
     "JCIM": {
         "url": "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=jcisd8",
         "tag": "aidd",
@@ -92,6 +134,16 @@ RSS_FEEDS = {
         "tag": "aidd",
         "type": "paper",
     },
+    "ACS Chemical Biology": {
+        "url": "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=acbcct",
+        "tag": "aidd",
+        "type": "paper",
+    },
+    "Chemical Reviews": {
+        "url": "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=chreay",
+        "tag": "aidd",
+        "type": "paper",
+    },
     "Chemical Science": {
         "url": "https://feeds.rsc.org/rss/sc",
         "tag": "aidd",
@@ -100,6 +152,33 @@ RSS_FEEDS = {
     "Digital Discovery": {
         "url": "https://feeds.rsc.org/rss/dd",
         "tag": "aidd",
+        "type": "paper",
+    },
+    "Chemical Society Reviews": {
+        "url": "https://feeds.rsc.org/rss/cs",
+        "tag": "aidd",
+        "type": "paper",
+    },
+    "RSC Medicinal Chemistry": {
+        "url": "https://feeds.rsc.org/rss/md",
+        "tag": "aidd",
+        "type": "paper",
+    },
+    "Journal of Cheminformatics": {
+        "url": "https://link.springer.com/search.rss?facet-journal-id=13321&channel-name=Journal%20of%20Cheminformatics",
+        "tag": "aidd",
+        "type": "paper",
+    },
+
+    # ================= Nature / Science / Cell / PNAS =================
+    "Nature Machine Intelligence": {
+        "url": "https://www.nature.com/natmachintell.rss",
+        "tag": "ml",
+        "type": "paper",
+    },
+    "Nature Computational Science": {
+        "url": "https://www.nature.com/natcomputsci.rss",
+        "tag": "ml",
         "type": "paper",
     },
     "Nature Chemistry": {
@@ -122,98 +201,18 @@ RSS_FEEDS = {
         "tag": "aidd",
         "type": "paper",
     },
-    "Bioinformatics": {
-        "url": "https://academic.oup.com/rss/site_5127/3091.xml",
+    "Nature Reviews Chemistry": {
+        "url": "https://www.nature.com/natrevchem/current_issue/rss",
         "tag": "aidd",
         "type": "paper",
     },
-    "Briefings in Bioinformatics": {
-        "url": "https://academic.oup.com/rss/site_5260/3091.xml",
-        "tag": "aidd",
+    "Nature Medicine": {
+        "url": "https://www.nature.com/nm/current_issue/rss",
+        "tag": "general",
         "type": "paper",
     },
-
-    # ================= ML / 通用 AI =================
-    "ArXiv cs.LG - Machine Learning": {
-        "url": "https://rss.arxiv.org/rss/cs.LG",
-        "tag": "ml",
-        "type": "paper",
-    },
-    "ArXiv cs.AI - Artificial Intelligence": {
-        "url": "https://rss.arxiv.org/rss/cs.AI",
-        "tag": "ml",
-        "type": "paper",
-    },
-    "ArXiv stat.ML - Statistical ML": {
-        "url": "https://rss.arxiv.org/rss/stat.ML",
-        "tag": "ml",
-        "type": "paper",
-    },
-    "ArXiv cs.NE - Neural and Evolutionary Computing": {
-        "url": "https://rss.arxiv.org/rss/cs.NE",
-        "tag": "ml",
-        "type": "paper",
-    },
-    "Nature Machine Intelligence": {
-        "url": "https://www.nature.com/natmachintell.rss",
-        "tag": "ml",
-        "type": "paper",
-    },
-    "Nature Computational Science": {
-        "url": "https://www.nature.com/natcomputsci.rss",
-        "tag": "ml",
-        "type": "paper",
-    },
-    "JMLR": {
-        "url": "https://jmlr.org/jmlr.xml",
-        "tag": "ml",
-        "type": "paper",
-    },
-
-    # ================= NLP / LLM =================
-    "ArXiv cs.CL - NLP": {
-        "url": "https://rss.arxiv.org/rss/cs.CL",
-        "tag": "nlp",
-        "type": "paper",
-    },
-    "ArXiv cs.IR - Information Retrieval / RAG": {
-        "url": "https://rss.arxiv.org/rss/cs.IR",
-        "tag": "nlp",
-        "type": "paper",
-    },
-
-    # ================= CV / 多模态 =================
-    "ArXiv cs.CV - Computer Vision": {
-        "url": "https://rss.arxiv.org/rss/cs.CV",
-        "tag": "cv",
-        "type": "paper",
-    },
-    "ArXiv eess.IV - Image and Video Processing": {
-        "url": "https://rss.arxiv.org/rss/eess.IV",
-        "tag": "cv",
-        "type": "paper",
-    },
-
-    # ================= 智能体 / 机器人 / 人机交互 =================
-    "ArXiv cs.MA - Multiagent Systems": {
-        "url": "https://rss.arxiv.org/rss/cs.MA",
-        "tag": "agent",
-        "type": "paper",
-    },
-    "ArXiv cs.RO - Robotics": {
-        "url": "https://rss.arxiv.org/rss/cs.RO",
-        "tag": "agent",
-        "type": "paper",
-    },
-    "ArXiv cs.HC - Human-Computer Interaction": {
-        "url": "https://rss.arxiv.org/rss/cs.HC",
-        "tag": "agent",
-        "type": "paper",
-    },
-
-    # ================= 综合性顶刊 =================
-    "Nature Communications": {
-        "url": "https://www.nature.com/ncomms.rss",
+    "Nature Methods": {
+        "url": "https://www.nature.com/nmeth.rss",
         "tag": "general",
         "type": "paper",
     },
@@ -222,8 +221,8 @@ RSS_FEEDS = {
         "tag": "general",
         "type": "paper",
     },
-    "Nature Methods": {
-        "url": "https://www.nature.com/nmeth.rss",
+    "Nature Communications": {
+        "url": "https://www.nature.com/ncomms.rss",
         "tag": "general",
         "type": "paper",
     },
@@ -257,14 +256,36 @@ RSS_FEEDS = {
         "tag": "general",
         "type": "paper",
     },
-    "Cell Reports Physical Science": {
-        "url": "https://www.cell.com/cell-reports-physical-science/inpress.rss",
+    "Cell Chemical Biology": {
+        "url": "https://www.cell.com/cell-chemical-biology/rss",
+        "tag": "aidd",
+        "type": "paper",
+    },
+    "Cell Reports Medicine": {
+        "url": "https://www.cell.com/cell-reports-medicine/rss",
         "tag": "general",
         "type": "paper",
     },
 
+    # ================= Bioinformatics / Computational Biology =================
+    "Bioinformatics": {
+        "url": "https://academic.oup.com/rss/site_5127/3091.xml",
+        "tag": "aidd",
+        "type": "paper",
+    },
+    "Briefings in Bioinformatics": {
+        "url": "https://academic.oup.com/rss/site_5260/3091.xml",
+        "tag": "aidd",
+        "type": "paper",
+    },
+    "Nucleic Acids Research": {
+        "url": "https://academic.oup.com/rss/site_5153/3127.xml",
+        "tag": "aidd",
+        "type": "paper",
+    },
+
     # ================= 工业界 / 实验室博客 =================
-    # 这些不是论文源，但适合追热点。脚本会用 blog/news prompt 摘要。
+    # 默认会被 EXCLUDED_FEED_TAGS = {"blog"} 跳过。
     "Google Research Blog": {
         "url": "https://research.google/blog/rss/",
         "tag": "blog",
@@ -285,18 +306,8 @@ RSS_FEEDS = {
         "tag": "blog",
         "type": "blog",
     },
-    "BAIR Blog": {
-        "url": "https://bair.berkeley.edu/blog/feed.xml",
-        "tag": "blog",
-        "type": "blog",
-    },
     "Hugging Face Blog": {
         "url": "https://huggingface.co/blog/feed.xml",
-        "tag": "blog",
-        "type": "blog",
-    },
-    "Distill": {
-        "url": "https://distill.pub/rss.xml",
         "tag": "blog",
         "type": "blog",
     },
@@ -305,27 +316,86 @@ RSS_FEEDS = {
 
 # ============================================================
 # 你后续新增期刊 RSS 地址就放这里
-# 格式照抄下面模板即可。
-# tag 建议：aidd / ml / nlp / cv / agent / general / blog / custom
-# type 建议：paper / blog / news
 # ============================================================
 
 USER_CUSTOM_RSS_FEEDS = {
     # "期刊或来源名称": {
     #     "url": "https://example.com/rss.xml",
-    #     "tag": "custom",
-    #     "type": "paper",
-    # },
-
-    # 例子：
-    # "RSC Medicinal Chemistry": {
-    #     "url": "在这里粘贴 RSS 地址",
     #     "tag": "aidd",
     #     "type": "paper",
     # },
 }
 
 RSS_FEEDS.update(USER_CUSTOM_RSS_FEEDS)
+
+
+# ============================================================
+# API 源：bioRxiv / ChemRxiv
+# 这些不是 RSS_FEEDS，不能用 feedparser 直接解析。
+# ============================================================
+
+API_SOURCES = {
+    # ================= bioRxiv =================
+    # 建议只抓最近 3 天，并按 category 限制，否则数量会很多。
+    "bioRxiv Bioinformatics": {
+        "provider": "biorxiv",
+        "server": "biorxiv",
+        "category": "bioinformatics",
+        "days": 3,
+        "tag": "preprint",
+        "type": "paper",
+    },
+    "bioRxiv Biophysics": {
+        "provider": "biorxiv",
+        "server": "biorxiv",
+        "category": "biophysics",
+        "days": 3,
+        "tag": "preprint",
+        "type": "paper",
+    },
+    "bioRxiv Molecular Biology": {
+        "provider": "biorxiv",
+        "server": "biorxiv",
+        "category": "molecular biology",
+        "days": 3,
+        "tag": "preprint",
+        "type": "paper",
+    },
+    "bioRxiv Biochemistry": {
+        "provider": "biorxiv",
+        "server": "biorxiv",
+        "category": "biochemistry",
+        "days": 3,
+        "tag": "preprint",
+        "type": "paper",
+    },
+    "bioRxiv Synthetic Biology": {
+        "provider": "biorxiv",
+        "server": "biorxiv",
+        "category": "synthetic biology",
+        "days": 3,
+        "tag": "preprint",
+        "type": "paper",
+    },
+
+    # ================= ChemRxiv =================
+    # 只保留与你更相关的分类；仍会经过关键词筛选。
+    "ChemRxiv AIDD / Computational Chemistry": {
+        "provider": "chemrxiv",
+        "url": "https://chemrxiv.org/engage/chemrxiv/public-api/v1/items",
+        "days": 7,
+        "allowed_categories": {
+            "Biological and Medicinal Chemistry",
+            "Theoretical and Computational Chemistry",
+            "Computational Chemistry",
+            "Cheminformatics",
+            "Artificial Intelligence",
+            "Pharmaceutical Industry",
+        },
+        "tag": "preprint",
+        "type": "paper",
+    },
+}
 
 
 # ============================================================
@@ -351,6 +421,7 @@ KEYWORD_GROUPS = {
         "interaction fingerprint", "molecular property prediction",
         "activity prediction", "retrosynthesis", "reaction prediction",
         "scoring function", "force field", "PROTAC",
+        "medicinal chemistry", "chemical biology", "cheminformatics",
     ],
 
     "3D Molecular / Generative Modeling": [
@@ -390,7 +461,7 @@ KEYWORD_GROUPS = {
         "agent", "AI agent", "LLM agent", "autonomous agent",
         "multi-agent", "multiagent", "tool use", "tool learning",
         "tool-using agent", "function calling", "planning", "task planning",
-        "reflection", "ReAct", "agentic", "embodied agent",
+        "reflection", "ReAct", "agentic",
         "web agent", "browser agent", "computer use", "GUI agent",
         "code agent", "workflow agent", "agent benchmark", "MCP",
         "scientific agent", "research agent", "chemistry agent", "biology agent",
@@ -404,8 +475,7 @@ KEYWORD_GROUPS = {
         "text-to-image", "video generation", "segmentation", "object detection",
         "detection", "visual reasoning", "diffusion transformer", "DiT",
         "image understanding", "medical image", "3D vision", "point cloud",
-        "scene understanding", "self-supervised", "contrastive learning",
-        "representation learning", "world model",
+        "scene understanding",
     ],
 
     "AI Infrastructure / General ML": [
@@ -415,8 +485,11 @@ KEYWORD_GROUPS = {
     ],
 }
 
-# 这些短词或容易误命中的词必须使用边界匹配。
-# 例如 agent 如果不用边界匹配，会误命中 reagent。
+
+# ============================================================
+# 关键词匹配强弱设置
+# ============================================================
+
 STRICT_MATCH_KEYWORDS = {
     "BFN", "GNN", "LLM", "VLM", "MLLM", "RAG", "MoE", "LoRA", "PEFT",
     "DPO", "RLHF", "MCP", "FEP", "QSAR", "ADMET", "PROTAC", "SE(3)",
@@ -424,7 +497,7 @@ STRICT_MATCH_KEYWORDS = {
 }
 STRICT_MATCH_KEYWORDS_LOWER = {kw.lower() for kw in STRICT_MATCH_KEYWORDS}
 
-# 弱关键词不能单独让 general/blog 源入库，否则综合顶刊和博客噪声会很大。
+# 弱关键词不能单独让 general/blog 源入库。
 WEAK_KEYWORDS = {
     "benchmark", "evaluation", "pretraining", "pre-training", "synthetic data",
     "dataset", "transformer", "generative", "representation learning",
@@ -442,25 +515,26 @@ HIGH_PRIORITY_KEYWORDS = {
     "multi-agent", "tool use", "RAG", "reasoning", "vision-language",
     "multimodal", "foundation model", "diffusion", "flow matching",
     "rectified flow", "graph transformer", "equivariant",
+    "cheminformatics", "medicinal chemistry", "chemical biology",
 }
 HIGH_PRIORITY_KEYWORDS_LOWER = {kw.lower() for kw in HIGH_PRIORITY_KEYWORDS}
 
-# 不同来源类型的最低分。
-# general/blog 源阈值更高，是为了减少综合大刊和博客的噪声。
-# 日常精选模式：
-# - aidd 稍微宽松，因为这是主方向；
-# - ml/nlp/cv/agent 提高门槛，避免泛 AI 文章过多；
-# - general/blog 最严格，因为综合大刊和博客噪声最大。
+
+# ============================================================
+# 不同来源的最低入库分数
+# ============================================================
+
 MIN_SCORE_BY_TAG = {
-    "aidd": 3,
-    "ml": 5,
-    "nlp": 5,
-    "cv": 5,
-    "agent": 5,
-    "general": 7,
-    "blog": 7,
-    "custom": 4,
-    None: 4,
+    "aidd": 4,
+    "ml": 7,
+    "nlp": 7,
+    "cv": 7,
+    "agent": 7,
+    "general": 8,
+    "blog": 8,
+    "preprint": 4,
+    "custom": 5,
+    None: 5,
 }
 
 
@@ -678,14 +752,13 @@ def relevance_score(matched_keywords, strong_keywords):
         if kw_lower in HIGH_PRIORITY_KEYWORDS_LOWER:
             score += 2
 
-    # 命中多个主题组本身也说明文章可能有交叉价值，但避免分数膨胀，只加少量。
     return score
 
 
 def should_keep_entry(text, feed_tag):
     matched_groups, matched_keywords, strong_keywords = match_keyword_groups(text)
     score = relevance_score(matched_keywords, strong_keywords)
-    min_score = MIN_SCORE_BY_TAG.get(feed_tag, 1)
+    min_score = MIN_SCORE_BY_TAG.get(feed_tag, MIN_SCORE_BY_TAG.get(None, 5))
 
     if not matched_keywords:
         return False, matched_groups, matched_keywords, strong_keywords, score
@@ -791,6 +864,147 @@ def push_to_notion(
 
 
 # ============================================================
+# API 源抓取：bioRxiv / ChemRxiv
+# ============================================================
+
+
+def fetch_json(url, headers=None):
+    req = Request(
+        url,
+        headers=headers or {
+            "User-Agent": "Mozilla/5.0 (compatible; AIDD-Daily-Bot/1.0)",
+            "Accept": "application/json",
+        },
+    )
+    with urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def parse_iso_date(date_text):
+    if not date_text:
+        return None
+
+    date_text = str(date_text).replace("Z", "+00:00")
+
+    try:
+        return datetime.datetime.fromisoformat(date_text)
+    except Exception:
+        pass
+
+    try:
+        return datetime.datetime.strptime(str(date_text)[:10], "%Y-%m-%d")
+    except Exception:
+        return None
+
+
+def fetch_biorxiv_entries(source_info, today_dt):
+    days = int(source_info.get("days", 3))
+    server = source_info.get("server", "biorxiv")
+    category = source_info.get("category")
+
+    start_date = (today_dt - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
+    end_date = today_dt.strftime("%Y-%m-%d")
+
+    base_url = f"https://api.biorxiv.org/details/{server}/{start_date}/{end_date}/0"
+
+    if category:
+        base_url += "?" + urlencode({"category": category})
+
+    data = fetch_json(base_url)
+    collection = data.get("collection", [])
+
+    entries = []
+    for item in collection:
+        doi = item.get("doi", "")
+        title = item.get("title", "")
+        abstract = item.get("abstract", "")
+        category_name = item.get("category", "")
+        date_text = item.get("date", "")
+
+        if not title or not doi:
+            continue
+
+        entries.append({
+            "title": title,
+            "link": f"https://www.biorxiv.org/content/{doi}",
+            "summary": abstract,
+            "id": doi,
+            "doi": doi,
+            "date": date_text,
+            "source_category": category_name,
+        })
+
+    return entries
+
+
+def fetch_chemrxiv_entries(source_info, today_dt):
+    url = source_info["url"]
+    allowed_categories = set(source_info.get("allowed_categories", set()))
+    days = int(source_info.get("days", 7))
+    cutoff_dt = today_dt - datetime.timedelta(days=days)
+
+    data = fetch_json(url)
+    hits = data.get("itemHits", [])
+
+    entries = []
+    for hit in hits:
+        item = hit.get("item", {})
+        if not item:
+            continue
+
+        categories = {
+            c.get("name", "")
+            for c in item.get("categories", [])
+            if c.get("name")
+        }
+
+        if allowed_categories and not (categories & allowed_categories):
+            continue
+
+        published_date = item.get("publishedDate") or item.get("approvedDate") or item.get("submittedDate")
+        parsed_date = parse_iso_date(published_date)
+        if parsed_date is not None:
+            # 去掉时区，方便和 today_dt 比较。
+            parsed_naive = parsed_date.replace(tzinfo=None)
+            today_naive = today_dt.replace(tzinfo=None)
+            cutoff_naive = cutoff_dt.replace(tzinfo=None)
+            if parsed_naive < cutoff_naive or parsed_naive > today_naive + datetime.timedelta(days=1):
+                continue
+
+        item_id = item.get("id", "")
+        doi = item.get("doi", "")
+        title = item.get("title", "")
+        abstract = item.get("abstract", "")
+
+        if not title or not item_id:
+            continue
+
+        entries.append({
+            "title": title,
+            "link": f"https://chemrxiv.org/engage/chemrxiv/article-details/{item_id}",
+            "summary": abstract,
+            "id": doi or item_id,
+            "doi": doi,
+            "date": published_date,
+            "source_category": "; ".join(sorted(categories)),
+        })
+
+    return entries
+
+
+def fetch_api_entries(source_info, today_dt):
+    provider = source_info.get("provider")
+
+    if provider == "biorxiv":
+        return fetch_biorxiv_entries(source_info, today_dt)
+
+    if provider == "chemrxiv":
+        return fetch_chemrxiv_entries(source_info, today_dt)
+
+    return []
+
+
+# ============================================================
 # DeepSeek 总结函数
 # ============================================================
 
@@ -888,6 +1102,110 @@ def call_deepseek(prompt):
 
 
 # ============================================================
+# 单条记录处理函数
+# ============================================================
+
+
+def process_entry(
+    entry,
+    source_name,
+    feed_tag,
+    entry_type,
+    today,
+    seen_paper_ids,
+    counters,
+):
+    title = ""
+
+    try:
+        title = strip_html(get_entry_field(entry, "title", "")).strip()
+        raw_url = str(get_entry_field(entry, "link", "")).strip()
+        abstract = strip_html(get_entry_field(entry, "summary", "No Abstract"))
+
+        if not title:
+            print("   ⚠️ 跳过一条无标题记录")
+            counters["skipped_error"] += 1
+            return
+
+        if not raw_url:
+            print(f"   ⚠️ 跳过无 URL 记录: {title[:60]}...")
+            counters["skipped_error"] += 1
+            return
+
+        canonical_url = canonicalize_url(raw_url)
+        paper_id = get_paper_id(entry)
+
+        text_content = f"{title} {abstract}"
+        keep, matched_groups, matched_keywords, strong_keywords, score = should_keep_entry(
+            text=text_content,
+            feed_tag=feed_tag,
+        )
+
+        if not keep:
+            counters["skipped_keyword"] += 1
+            return
+
+        if paper_id in seen_paper_ids:
+            print(f"   💨 本次运行已见过: {title[:60]}... [{paper_id}]")
+            counters["skipped_existing"] += 1
+            return
+
+        seen_paper_ids.add(paper_id)
+
+        exists = check_if_exists(
+            paper_id=paper_id,
+            canonical_url=canonical_url,
+            raw_url=raw_url,
+            title=title,
+        )
+
+        if exists:
+            print(f"   💨 已存在: {title[:60]}... [{paper_id}]")
+            counters["skipped_existing"] += 1
+            return
+
+        if entry_type in {"blog", "news"}:
+            summary = summarize_blog_or_news(
+                title=title,
+                abstract=abstract,
+                matched_groups=matched_groups,
+                score=score,
+            )
+        else:
+            summary = summarize_paper(
+                title=title,
+                abstract=abstract,
+                matched_groups=matched_groups,
+                score=score,
+            )
+
+        push_to_notion(
+            title=title,
+            url=canonical_url,
+            summary=summary,
+            source=source_name,
+            date_str=today,
+            paper_id=paper_id,
+            feed_tag=feed_tag,
+            entry_type=entry_type,
+            matched_groups=matched_groups,
+            score=score,
+        )
+
+        print(
+            f"   🔎 topics={matched_groups}; "
+            f"strong={strong_keywords[:5]}; score={score}"
+        )
+
+        counters["new"] += 1
+
+    except Exception as e:
+        print(f"   ❌ 单篇处理失败: {title[:60] if title else '未知标题'}")
+        print(f"      错误: {e}")
+        counters["skipped_error"] += 1
+
+
+# ============================================================
 # 主程序
 # ============================================================
 
@@ -896,7 +1214,8 @@ def run():
     print("🚀 开始抓取每日论文 / 科研动态...")
 
     tz = pytz.timezone(TIMEZONE)
-    today = datetime.datetime.now(tz).strftime("%Y-%m-%d")
+    today_dt = datetime.datetime.now(tz)
+    today = today_dt.strftime("%Y-%m-%d")
 
     headers = {
         "User-Agent": (
@@ -912,13 +1231,21 @@ def run():
 
     seen_paper_ids = set()
 
-    total_new = 0
-    total_skipped_existing = 0
-    total_skipped_keyword = 0
-    total_skipped_error = 0
-    total_feed_error = 0
+    counters = {
+        "new": 0,
+        "skipped_existing": 0,
+        "skipped_keyword": 0,
+        "skipped_error": 0,
+        "feed_error": 0,
+    }
+
+    # ================= RSS 源 =================
 
     for source_name, feed_info in RSS_FEEDS.items():
+        if source_name in EXCLUDED_FEED_NAMES:
+            print("\n⏭️ 跳过来源: {}，如需启用请从 EXCLUDED_FEED_NAMES 中移除".format(source_name))
+            continue
+
         # 兼容旧格式：若值是字符串则当作纯 URL
         if isinstance(feed_info, str):
             feed_url = feed_info
@@ -930,10 +1257,10 @@ def run():
             entry_type = feed_info.get("type", "paper")
 
         if feed_tag in EXCLUDED_FEED_TAGS:
-            print("\\n⏭️ 跳过来源: {} [{}]，如需启用请修改 EXCLUDED_FEED_TAGS".format(source_name, feed_tag))
+            print("\n⏭️ 跳过来源: {} [{}]，如需启用请修改 EXCLUDED_FEED_TAGS".format(source_name, feed_tag))
             continue
 
-        print("\\n📡 正在扫描: {} [{} / {}] ...".format(source_name, feed_tag or "-", entry_type), end="")
+        print("\n📡 正在扫描: {} [{} / {}] ...".format(source_name, feed_tag or "-", entry_type), end="")
 
         try:
             feed = feedparser.parse(feed_url, request_headers=headers)
@@ -941,7 +1268,7 @@ def run():
             status = getattr(feed, "status", 200)
             if status not in {200, 301, 302, 304}:
                 print(f" [❌ 失败: 状态码 {status}]")
-                total_feed_error += 1
+                counters["feed_error"] += 1
                 continue
 
             entries = getattr(feed, "entries", [])
@@ -954,106 +1281,66 @@ def run():
                 continue
 
             for entry in entries[:MAX_ENTRIES_PER_FEED]:
-                title = ""
-                try:
-                    title = strip_html(get_entry_field(entry, "title", "")).strip()
-                    raw_url = get_entry_field(entry, "link", "").strip()
-                    abstract = strip_html(get_entry_field(entry, "summary", "No Abstract"))
-
-                    if not title:
-                        print("   ⚠️ 跳过一条无标题记录")
-                        total_skipped_error += 1
-                        continue
-
-                    if not raw_url:
-                        print(f"   ⚠️ 跳过无 URL 记录: {title[:60]}...")
-                        total_skipped_error += 1
-                        continue
-
-                    canonical_url = canonicalize_url(raw_url)
-                    paper_id = get_paper_id(entry)
-
-                    text_content = f"{title} {abstract}"
-                    keep, matched_groups, matched_keywords, strong_keywords, score = should_keep_entry(
-                        text=text_content,
-                        feed_tag=feed_tag,
-                    )
-
-                    if not keep:
-                        total_skipped_keyword += 1
-                        continue
-
-                    if paper_id in seen_paper_ids:
-                        print(f"   💨 本次运行已见过: {title[:60]}... [{paper_id}]")
-                        total_skipped_existing += 1
-                        continue
-
-                    seen_paper_ids.add(paper_id)
-
-                    exists = check_if_exists(
-                        paper_id=paper_id,
-                        canonical_url=canonical_url,
-                        raw_url=raw_url,
-                        title=title,
-                    )
-
-                    if exists:
-                        print(f"   💨 已存在: {title[:60]}... [{paper_id}]")
-                        total_skipped_existing += 1
-                        continue
-
-                    if entry_type in {"blog", "news"}:
-                        summary = summarize_blog_or_news(
-                            title=title,
-                            abstract=abstract,
-                            matched_groups=matched_groups,
-                            score=score,
-                        )
-                    else:
-                        summary = summarize_paper(
-                            title=title,
-                            abstract=abstract,
-                            matched_groups=matched_groups,
-                            score=score,
-                        )
-
-                    push_to_notion(
-                        title=title,
-                        url=canonical_url,
-                        summary=summary,
-                        source=source_name,
-                        date_str=today,
-                        paper_id=paper_id,
-                        feed_tag=feed_tag,
-                        entry_type=entry_type,
-                        matched_groups=matched_groups,
-                        score=score,
-                    )
-
-                    print(
-                        f"   🔎 topics={matched_groups}; "
-                        f"strong={strong_keywords[:5]}; score={score}"
-                    )
-
-                    total_new += 1
-
-                except Exception as e:
-                    print(f"   ❌ 单篇处理失败: {title[:60] if title else '未知标题'}")
-                    print(f"      错误: {e}")
-                    total_skipped_error += 1
-                    continue
+                process_entry(
+                    entry=entry,
+                    source_name=source_name,
+                    feed_tag=feed_tag,
+                    entry_type=entry_type,
+                    today=today,
+                    seen_paper_ids=seen_paper_ids,
+                    counters=counters,
+                )
 
         except Exception as e:
             print(f"\n⚠️ RSS 源解析出错: {source_name}, 错误: {e}")
-            total_feed_error += 1
+            counters["feed_error"] += 1
+            continue
+
+    # ================= API 源：bioRxiv / ChemRxiv =================
+
+    for source_name, source_info in API_SOURCES.items():
+        feed_tag = source_info.get("tag", "preprint")
+        entry_type = source_info.get("type", "paper")
+
+        if source_name in EXCLUDED_FEED_NAMES:
+            print("\n⏭️ 跳过 API 来源: {}，如需启用请从 EXCLUDED_FEED_NAMES 中移除".format(source_name))
+            continue
+
+        if feed_tag in EXCLUDED_FEED_TAGS:
+            print("\n⏭️ 跳过 API 来源: {} [{}]".format(source_name, feed_tag))
+            continue
+
+        print("\n📡 正在扫描 API 来源: {} [{} / {}] ...".format(source_name, feed_tag, entry_type), end="")
+
+        try:
+            api_entries = fetch_api_entries(source_info, today_dt)
+            print(f" [✅ 获取成功，发现 {len(api_entries)} 条记录]")
+
+            for entry in api_entries[:MAX_ENTRIES_PER_API_SOURCE]:
+                process_entry(
+                    entry=entry,
+                    source_name=source_name,
+                    feed_tag=feed_tag,
+                    entry_type=entry_type,
+                    today=today,
+                    seen_paper_ids=seen_paper_ids,
+                    counters=counters,
+                )
+
+            # 避免连续请求 preprint API 过快。
+            time.sleep(0.5)
+
+        except Exception as e:
+            print(f"\n⚠️ API 源解析出错: {source_name}, 错误: {e}")
+            counters["feed_error"] += 1
             continue
 
     print("\n================= 今日抓取完成 =================")
-    print(f"✅ 新增论文 / 动态: {total_new}")
-    print(f"💨 已存在 / 重复跳过: {total_skipped_existing}")
-    print(f"🔎 关键词不匹配跳过: {total_skipped_keyword}")
-    print(f"⚠️ 单篇错误跳过: {total_skipped_error}")
-    print(f"📡 RSS 源错误: {total_feed_error}")
+    print(f"✅ 新增论文 / 动态: {counters['new']}")
+    print(f"💨 已存在 / 重复跳过: {counters['skipped_existing']}")
+    print(f"🔎 关键词不匹配跳过: {counters['skipped_keyword']}")
+    print(f"⚠️ 单篇错误跳过: {counters['skipped_error']}")
+    print(f"📡 RSS/API 源错误: {counters['feed_error']}")
     print("================================================")
 
 
