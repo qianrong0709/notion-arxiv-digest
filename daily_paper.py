@@ -22,11 +22,20 @@ TIMEZONE = "Asia/Shanghai"
 
 # 日常精选模式：不要太高，否则 arXiv 每天会进太多。
 # 如果某天想高召回，可以临时改成 25 或 50。
-MAX_ENTRIES_PER_FEED = 15
-MAX_ENTRIES_PER_API_SOURCE = 15
+MAX_ENTRIES_PER_FEED = 25
+# 预印本单源不要太高，否则 bioRxiv/ChemRxiv 会压过期刊源。
+MAX_ENTRIES_PER_API_SOURCE = 5
+# 每次运行最多入库多少篇预印本，避免 Notion 被 preprint 刷屏。
+MAX_TOTAL_PREPRINTS_PER_RUN = 8
 
 # 默认跳过博客源，避免 OpenAI / DeepMind / HF 等动态把 Notion 塞满。
 EXCLUDED_FEED_TAGS = {"blog"}
+
+# 默认关闭一部分较宽的 preprint API 源。需要时从这里移除即可。
+EXCLUDED_API_SOURCE_NAMES = {
+    "bioRxiv Molecular Biology",
+    "bioRxiv Synthetic Biology",
+}
 
 # 默认关闭的一些 arXiv 边缘源。
 # 这些源目前没有放进 RSS_FEEDS；保留此项是为了以后重新加入时可直接控制。
@@ -202,12 +211,12 @@ RSS_FEEDS = {
         "type": "paper",
     },
     "Nature Reviews Chemistry": {
-        "url": "https://www.nature.com/natrevchem/current_issue/rss",
+        "url": "https://www.nature.com/natrevchem/journal/vaop/ncurrent/rss.rdf",
         "tag": "aidd",
         "type": "paper",
     },
     "Nature Medicine": {
-        "url": "https://www.nature.com/nm/current_issue/rss",
+        "url": "https://www.nature.com/nm/journal/vaop/ncurrent/rss.rdf",
         "tag": "general",
         "type": "paper",
     },
@@ -341,7 +350,7 @@ API_SOURCES = {
         "provider": "biorxiv",
         "server": "biorxiv",
         "category": "bioinformatics",
-        "days": 3,
+        "days": 1,
         "tag": "preprint",
         "type": "paper",
     },
@@ -349,7 +358,7 @@ API_SOURCES = {
         "provider": "biorxiv",
         "server": "biorxiv",
         "category": "biophysics",
-        "days": 3,
+        "days": 1,
         "tag": "preprint",
         "type": "paper",
     },
@@ -357,7 +366,7 @@ API_SOURCES = {
         "provider": "biorxiv",
         "server": "biorxiv",
         "category": "molecular biology",
-        "days": 3,
+        "days": 1,
         "tag": "preprint",
         "type": "paper",
     },
@@ -365,7 +374,7 @@ API_SOURCES = {
         "provider": "biorxiv",
         "server": "biorxiv",
         "category": "biochemistry",
-        "days": 3,
+        "days": 1,
         "tag": "preprint",
         "type": "paper",
     },
@@ -373,7 +382,7 @@ API_SOURCES = {
         "provider": "biorxiv",
         "server": "biorxiv",
         "category": "synthetic biology",
-        "days": 3,
+        "days": 1,
         "tag": "preprint",
         "type": "paper",
     },
@@ -383,7 +392,7 @@ API_SOURCES = {
     "ChemRxiv AIDD / Computational Chemistry": {
         "provider": "chemrxiv",
         "url": "https://chemrxiv.org/engage/chemrxiv/public-api/v1/items",
-        "days": 7,
+        "days": 3,
         "allowed_categories": {
             "Biological and Medicinal Chemistry",
             "Theoretical and Computational Chemistry",
@@ -525,14 +534,18 @@ HIGH_PRIORITY_KEYWORDS_LOWER = {kw.lower() for kw in HIGH_PRIORITY_KEYWORDS}
 # ============================================================
 
 MIN_SCORE_BY_TAG = {
-    "aidd": 4,
+    # 期刊主线稍微放宽。
+    "aidd": 3,
+    # arXiv AI 大类仍然严格。
     "ml": 7,
     "nlp": 7,
     "cv": 7,
     "agent": 7,
-    "general": 8,
+    # 综合期刊适度放宽，否则 Nature Medicine / Nature Methods / PNAS 相关论文也容易被过滤掉。
+    "general": 6,
     "blog": 8,
-    "preprint": 4,
+    # preprint 提高阈值，避免 bioRxiv / ChemRxiv 压过正式期刊。
+    "preprint": 7,
     "custom": 5,
     None: 5,
 }
@@ -1125,12 +1138,12 @@ def process_entry(
         if not title:
             print("   ⚠️ 跳过一条无标题记录")
             counters["skipped_error"] += 1
-            return
+            return False
 
         if not raw_url:
             print(f"   ⚠️ 跳过无 URL 记录: {title[:60]}...")
             counters["skipped_error"] += 1
-            return
+            return False
 
         canonical_url = canonicalize_url(raw_url)
         paper_id = get_paper_id(entry)
@@ -1143,12 +1156,12 @@ def process_entry(
 
         if not keep:
             counters["skipped_keyword"] += 1
-            return
+            return False
 
         if paper_id in seen_paper_ids:
             print(f"   💨 本次运行已见过: {title[:60]}... [{paper_id}]")
             counters["skipped_existing"] += 1
-            return
+            return False
 
         seen_paper_ids.add(paper_id)
 
@@ -1162,7 +1175,7 @@ def process_entry(
         if exists:
             print(f"   💨 已存在: {title[:60]}... [{paper_id}]")
             counters["skipped_existing"] += 1
-            return
+            return False
 
         if entry_type in {"blog", "news"}:
             summary = summarize_blog_or_news(
@@ -1198,11 +1211,13 @@ def process_entry(
         )
 
         counters["new"] += 1
+        return True
 
     except Exception as e:
         print(f"   ❌ 单篇处理失败: {title[:60] if title else '未知标题'}")
         print(f"      错误: {e}")
         counters["skipped_error"] += 1
+        return False
 
 
 # ============================================================
@@ -1237,6 +1252,7 @@ def run():
         "skipped_keyword": 0,
         "skipped_error": 0,
         "feed_error": 0,
+        "preprint_new": 0,
     }
 
     # ================= RSS 源 =================
@@ -1299,6 +1315,14 @@ def run():
     # ================= API 源：bioRxiv / ChemRxiv =================
 
     for source_name, source_info in API_SOURCES.items():
+        if source_name in EXCLUDED_API_SOURCE_NAMES:
+            print("\n⏭️ 跳过 API 来源: {}，如需启用请从 EXCLUDED_API_SOURCE_NAMES 中移除".format(source_name))
+            continue
+
+        if counters.get("preprint_new", 0) >= MAX_TOTAL_PREPRINTS_PER_RUN:
+            print("\n⏹️ 已达到本次运行预印本入库上限: {}".format(MAX_TOTAL_PREPRINTS_PER_RUN))
+            break
+
         feed_tag = source_info.get("tag", "preprint")
         entry_type = source_info.get("type", "paper")
 
@@ -1317,7 +1341,7 @@ def run():
             print(f" [✅ 获取成功，发现 {len(api_entries)} 条记录]")
 
             for entry in api_entries[:MAX_ENTRIES_PER_API_SOURCE]:
-                process_entry(
+                inserted = process_entry(
                     entry=entry,
                     source_name=source_name,
                     feed_tag=feed_tag,
@@ -1326,6 +1350,12 @@ def run():
                     seen_paper_ids=seen_paper_ids,
                     counters=counters,
                 )
+
+                if inserted and feed_tag == "preprint":
+                    counters["preprint_new"] += 1
+                    if counters["preprint_new"] >= MAX_TOTAL_PREPRINTS_PER_RUN:
+                        print("   ⏹️ 已达到本次运行预印本入库上限: {}".format(MAX_TOTAL_PREPRINTS_PER_RUN))
+                        break
 
             # 避免连续请求 preprint API 过快。
             time.sleep(0.5)
@@ -1341,6 +1371,7 @@ def run():
     print(f"🔎 关键词不匹配跳过: {counters['skipped_keyword']}")
     print(f"⚠️ 单篇错误跳过: {counters['skipped_error']}")
     print(f"📡 RSS/API 源错误: {counters['feed_error']}")
+    print(f"🧪 其中预印本新增: {counters.get('preprint_new', 0)}")
     print("================================================")
 
 
