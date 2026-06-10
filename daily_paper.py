@@ -84,38 +84,8 @@ RSS_FEEDS = {
     },
 
     # ================= arXiv：核心 AI / ML =================
-    "ArXiv cs.LG - Machine Learning": {
-        "url": "https://rss.arxiv.org/rss/cs.LG",
-        "tag": "ml",
-        "type": "paper",
-    },
-    "ArXiv cs.AI - Artificial Intelligence": {
-        "url": "https://rss.arxiv.org/rss/cs.AI",
-        "tag": "ml",
-        "type": "paper",
-    },
-    "ArXiv stat.ML - Statistical ML": {
-        "url": "https://rss.arxiv.org/rss/stat.ML",
-        "tag": "ml",
-        "type": "paper",
-    },
 
     # ================= arXiv：NLP / CV / Agent 核心源 =================
-    "ArXiv cs.CL - NLP": {
-        "url": "https://rss.arxiv.org/rss/cs.CL",
-        "tag": "nlp",
-        "type": "paper",
-    },
-    "ArXiv cs.CV - Computer Vision": {
-        "url": "https://rss.arxiv.org/rss/cs.CV",
-        "tag": "cv",
-        "type": "paper",
-    },
-    "ArXiv cs.MA - Multiagent Systems": {
-        "url": "https://rss.arxiv.org/rss/cs.MA",
-        "tag": "agent",
-        "type": "paper",
-    },
 
     # ================= AIDD / 计算化学 / 药物化学期刊 =================
     "JCIM": {
@@ -398,7 +368,6 @@ API_SOURCES = {
             "Theoretical and Computational Chemistry",
             "Computational Chemistry",
             "Cheminformatics",
-            "Artificial Intelligence",
             "Pharmaceutical Industry",
         },
         "tag": "preprint",
@@ -428,8 +397,7 @@ KEYWORD_GROUPS = {
         "lead optimization", "hit discovery", "small molecule",
         "fragment-based", "fragment based", "pharmacophore",
         "interaction fingerprint", "molecular property prediction",
-        "activity prediction", "retrosynthesis", "reaction prediction",
-        "scoring function", "force field", "PROTAC",
+        "activity prediction", "scoring function", "force field", "PROTAC",
         "medicinal chemistry", "chemical biology", "cheminformatics",
     ],
 
@@ -452,45 +420,6 @@ KEYWORD_GROUPS = {
         "RFdiffusion", "RoseTTAFold", "ESM", "Boltz", "Chai",
         "structure prediction", "cryo-EM", "electron density", "density map",
         "X-ray crystallography", "binding site", "protein-ligand complex",
-    ],
-
-    "LLM / NLP": [
-        "large language model", "LLM", "language model", "foundation model",
-        "instruction tuning", "alignment", "RLHF", "DPO",
-        "preference optimization", "reasoning", "chain-of-thought",
-        "chain of thought", "in-context learning", "in context learning",
-        "retrieval augmented generation", "retrieval-augmented", "RAG",
-        "long context", "context window", "fine-tuning", "LoRA", "PEFT",
-        "mixture of experts", "MoE", "tokenizer", "text generation",
-        "code generation", "program synthesis", "scientific discovery",
-        "AI scientist",
-    ],
-
-    "Agent / Autonomous AI": [
-        "agent", "AI agent", "LLM agent", "autonomous agent",
-        "multi-agent", "multiagent", "tool use", "tool learning",
-        "tool-using agent", "function calling", "planning", "task planning",
-        "reflection", "ReAct", "agentic",
-        "web agent", "browser agent", "computer use", "GUI agent",
-        "code agent", "workflow agent", "agent benchmark", "MCP",
-        "scientific agent", "research agent", "chemistry agent", "biology agent",
-        "laboratory automation", "lab automation", "self-driving lab",
-        "closed-loop discovery", "active learning",
-    ],
-
-    "CV / Multimodal": [
-        "computer vision", "vision-language", "vision language", "multimodal",
-        "multimodal large language model", "MLLM", "VLM", "image generation",
-        "text-to-image", "video generation", "segmentation", "object detection",
-        "detection", "visual reasoning", "diffusion transformer", "DiT",
-        "image understanding", "medical image", "3D vision", "point cloud",
-        "scene understanding",
-    ],
-
-    "AI Infrastructure / General ML": [
-        "pretraining", "pre-training", "scaling law", "benchmark", "evaluation",
-        "synthetic data", "dataset", "transformer", "generative", "foundation model",
-        "model compression", "distillation", "efficient training", "inference",
     ],
 }
 
@@ -520,11 +449,9 @@ HIGH_PRIORITY_KEYWORDS = {
     "structure-based drug design", "molecular generation", "de novo drug design",
     "protein-ligand", "binding pocket", "virtual screening", "ADMET",
     "molecular docking", "protein design", "protein language model",
-    "electron density", "large language model", "LLM", "AI agent",
-    "multi-agent", "tool use", "RAG", "reasoning", "vision-language",
-    "multimodal", "foundation model", "diffusion", "flow matching",
-    "rectified flow", "graph transformer", "equivariant",
-    "cheminformatics", "medicinal chemistry", "chemical biology",
+    "electron density", "diffusion", "flow matching", "rectified flow",
+    "graph transformer", "equivariant", "cheminformatics",
+    "medicinal chemistry", "chemical biology",
 }
 HIGH_PRIORITY_KEYWORDS_LOWER = {kw.lower() for kw in HIGH_PRIORITY_KEYWORDS}
 
