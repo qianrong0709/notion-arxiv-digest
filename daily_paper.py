@@ -77,11 +77,11 @@ RSS_FEEDS = {
         "tag": "aidd",
         "type": "paper",
     },
-    "ArXiv physics.chem-ph - Chemical Physics": {
-        "url": "https://rss.arxiv.org/rss/physics.chem-ph",
-        "tag": "aidd",
-        "type": "paper",
-    },
+    # "ArXiv physics.chem-ph - Chemical Physics": {
+    #     "url": "https://rss.arxiv.org/rss/physics.chem-ph",
+    #     "tag": "aidd",
+    #     "type": "paper",
+    # },
 
     # ================= arXiv：核心 AI / ML =================
 
@@ -324,14 +324,14 @@ API_SOURCES = {
         "tag": "preprint",
         "type": "paper",
     },
-    "bioRxiv Biophysics": {
-        "provider": "biorxiv",
-        "server": "biorxiv",
-        "category": "biophysics",
-        "days": 1,
-        "tag": "preprint",
-        "type": "paper",
-    },
+    # "bioRxiv Biophysics": {
+    #     "provider": "biorxiv",
+    #     "server": "biorxiv",
+    #     "category": "biophysics",
+    #     "days": 1,
+    #     "tag": "preprint",
+    #     "type": "paper",
+    # },
     "bioRxiv Molecular Biology": {
         "provider": "biorxiv",
         "server": "biorxiv",
@@ -348,14 +348,14 @@ API_SOURCES = {
         "tag": "preprint",
         "type": "paper",
     },
-    "bioRxiv Synthetic Biology": {
-        "provider": "biorxiv",
-        "server": "biorxiv",
-        "category": "synthetic biology",
-        "days": 1,
-        "tag": "preprint",
-        "type": "paper",
-    },
+    # "bioRxiv Synthetic Biology": {
+    #     "provider": "biorxiv",
+    #     "server": "biorxiv",
+    #     "category": "synthetic biology",
+    #     "days": 1,
+    #     "tag": "preprint",
+    #     "type": "paper",
+    # },
 
     # ================= ChemRxiv =================
     # 只保留与你更相关的分类；仍会经过关键词筛选。
