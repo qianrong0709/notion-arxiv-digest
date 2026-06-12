@@ -28,6 +28,20 @@ MAX_ENTRIES_PER_API_SOURCE = 5
 # 每次运行最多入库多少篇预印本，避免 Notion 被 preprint 刷屏。
 MAX_TOTAL_PREPRINTS_PER_RUN = 8
 
+# 部分综合期刊更新量较大。这里增加扫描条数，但仍然要经过关键词筛选；
+# 不是“看见就收”。
+SOURCE_MAX_ENTRIES = {
+    "Nature Communications": 100,
+    "Science": 80,
+    "Science Advances": 80,
+    "PNAS": 80,
+    "Nature Machine Intelligence": 50,
+    "Nature Computational Science": 50,
+    "Nature Methods": 50,
+    "Nature Medicine": 50,
+    "Nature Biotechnology": 50,
+}
+
 # 默认跳过博客源，避免 OpenAI / DeepMind / HF 等动态把 Notion 塞满。
 EXCLUDED_FEED_TAGS = {"blog"}
 
@@ -77,15 +91,11 @@ RSS_FEEDS = {
         "tag": "aidd",
         "type": "paper",
     },
-    # "ArXiv physics.chem-ph - Chemical Physics": {
-    #     "url": "https://rss.arxiv.org/rss/physics.chem-ph",
-    #     "tag": "aidd",
-    #     "type": "paper",
-    # },
-
-    # ================= arXiv：核心 AI / ML =================
-
-    # ================= arXiv：NLP / CV / Agent 核心源 =================
+    "ArXiv physics.chem-ph - Chemical Physics": {
+        "url": "https://rss.arxiv.org/rss/physics.chem-ph",
+        "tag": "aidd",
+        "type": "paper",
+    },
 
     # ================= AIDD / 计算化学 / 药物化学期刊 =================
     "JCIM": {
@@ -324,14 +334,14 @@ API_SOURCES = {
         "tag": "preprint",
         "type": "paper",
     },
-    # "bioRxiv Biophysics": {
-    #     "provider": "biorxiv",
-    #     "server": "biorxiv",
-    #     "category": "biophysics",
-    #     "days": 1,
-    #     "tag": "preprint",
-    #     "type": "paper",
-    # },
+    "bioRxiv Biophysics": {
+        "provider": "biorxiv",
+        "server": "biorxiv",
+        "category": "biophysics",
+        "days": 1,
+        "tag": "preprint",
+        "type": "paper",
+    },
     "bioRxiv Molecular Biology": {
         "provider": "biorxiv",
         "server": "biorxiv",
@@ -348,14 +358,14 @@ API_SOURCES = {
         "tag": "preprint",
         "type": "paper",
     },
-    # "bioRxiv Synthetic Biology": {
-    #     "provider": "biorxiv",
-    #     "server": "biorxiv",
-    #     "category": "synthetic biology",
-    #     "days": 1,
-    #     "tag": "preprint",
-    #     "type": "paper",
-    # },
+    "bioRxiv Synthetic Biology": {
+        "provider": "biorxiv",
+        "server": "biorxiv",
+        "category": "synthetic biology",
+        "days": 1,
+        "tag": "preprint",
+        "type": "paper",
+    },
 
     # ================= ChemRxiv =================
     # 只保留与你更相关的分类；仍会经过关键词筛选。
@@ -368,7 +378,6 @@ API_SOURCES = {
             "Theoretical and Computational Chemistry",
             "Computational Chemistry",
             "Cheminformatics",
-            "Pharmaceutical Industry",
         },
         "tag": "preprint",
         "type": "paper",
@@ -397,7 +406,7 @@ KEYWORD_GROUPS = {
         "lead optimization", "hit discovery", "small molecule",
         "fragment-based", "fragment based", "pharmacophore",
         "interaction fingerprint", "molecular property prediction",
-        "activity prediction", "scoring function", "force field", "PROTAC",
+        "activity prediction", "scoring function", "force field",
         "medicinal chemistry", "chemical biology", "cheminformatics",
     ],
 
@@ -408,16 +417,13 @@ KEYWORD_GROUPS = {
         "flow matching", "rectified flow", "score-based", "score based",
         "Bayesian flow network", "BFN", "graph neural network", "GNN",
         "message passing", "graph transformer", "molecular graph",
-        "molecular foundation model", "molecular representation",
-        "pocket-conditioned", "pocket conditioned",
+        "molecular representation", "pocket-conditioned", "pocket conditioned",
     ],
 
     "Protein / Structural Biology": [
         "protein design", "protein generation", "protein language model",
-        "protein structure prediction", "protein folding", "protein-protein interaction",
-        "protein protein interaction", "PPI", "antibody design", "enzyme design",
-        "binder design", "peptide design", "inverse folding", "AlphaFold",
-        "RFdiffusion", "RoseTTAFold", "ESM", "Boltz", "Chai",
+        "protein structure prediction", "protein folding", "inverse folding",
+        "AlphaFold", "RFdiffusion", "RoseTTAFold", "ESM", "Boltz", "Chai",
         "structure prediction", "cryo-EM", "electron density", "density map",
         "X-ray crystallography", "binding site", "protein-ligand complex",
     ],
@@ -429,29 +435,29 @@ KEYWORD_GROUPS = {
 # ============================================================
 
 STRICT_MATCH_KEYWORDS = {
-    "BFN", "GNN", "LLM", "VLM", "MLLM", "RAG", "MoE", "LoRA", "PEFT",
-    "DPO", "RLHF", "MCP", "FEP", "QSAR", "ADMET", "PROTAC", "SE(3)",
-    "E(3)", "SO(3)", "ESM", "PPI", "DiT", "AI", "agent", "ReAct",
+    "BFN", "GNN", "FEP", "QSAR", "ADMET", "SE(3)",
+    "E(3)", "SO(3)", "ESM",
 }
 STRICT_MATCH_KEYWORDS_LOWER = {kw.lower() for kw in STRICT_MATCH_KEYWORDS}
 
 # 弱关键词不能单独让 general/blog 源入库。
 WEAK_KEYWORDS = {
-    "benchmark", "evaluation", "pretraining", "pre-training", "synthetic data",
-    "dataset", "transformer", "generative", "representation learning",
-    "self-supervised", "contrastive learning", "model compression",
-    "distillation", "efficient training", "inference", "planning",
+    "diffusion", "diffusion model", "score-based", "score based",
+    "graph neural network", "GNN", "message passing",
+    "molecular representation", "structure prediction",
 }
 WEAK_KEYWORDS_LOWER = {kw.lower() for kw in WEAK_KEYWORDS}
 
 # 高优先级关键词：命中后相关性加权更高。
 HIGH_PRIORITY_KEYWORDS = {
     "structure-based drug design", "molecular generation", "de novo drug design",
-    "protein-ligand", "binding pocket", "virtual screening", "ADMET",
-    "molecular docking", "protein design", "protein language model",
-    "electron density", "diffusion", "flow matching", "rectified flow",
-    "graph transformer", "equivariant", "cheminformatics",
-    "medicinal chemistry", "chemical biology",
+    "protein-ligand", "binding pocket", "binding site", "virtual screening",
+    "ADMET", "molecular docking", "binding affinity",
+    "protein design", "protein generation", "protein language model",
+    "protein structure prediction", "electron density", "density map",
+    "pocket-conditioned", "pocket conditioned",
+    "flow matching", "rectified flow", "graph transformer", "equivariant",
+    "cheminformatics", "medicinal chemistry", "chemical biology",
 }
 HIGH_PRIORITY_KEYWORDS_LOWER = {kw.lower() for kw in HIGH_PRIORITY_KEYWORDS}
 
@@ -461,18 +467,19 @@ HIGH_PRIORITY_KEYWORDS_LOWER = {kw.lower() for kw in HIGH_PRIORITY_KEYWORDS}
 # ============================================================
 
 MIN_SCORE_BY_TAG = {
-    # 期刊主线稍微放宽。
+    # AIDD 专业期刊和 arXiv q-bio/chem-ph：中等门槛。
     "aidd": 3,
-    # arXiv AI 大类仍然严格。
-    "ml": 7,
-    "nlp": 7,
-    "cv": 7,
-    "agent": 7,
-    # 综合期刊适度放宽，否则 Nature Medicine / Nature Methods / PNAS 相关论文也容易被过滤掉。
-    "general": 6,
+
+    # NMI / Nature Computational Science 保留源，但只收与 AIDD/分子/蛋白相关的文章。
+    "ml": 4,
+
+    # 综合期刊保留源，但必须命中较明确的 AIDD/结构生物关键词。
+    "general": 5,
+
+    # 预印本数量大，必须更相关才入库。
+    "preprint": 8,
+
     "blog": 8,
-    # preprint 提高阈值，避免 bioRxiv / ChemRxiv 压过正式期刊。
-    "preprint": 7,
     "custom": 5,
     None: 5,
 }
@@ -1223,7 +1230,9 @@ def run():
                 print("   ⚠️ 源是通的，但没有解析到记录，可能今天没更新或 RSS 格式变化")
                 continue
 
-            for entry in entries[:MAX_ENTRIES_PER_FEED]:
+            max_entries = SOURCE_MAX_ENTRIES.get(source_name, MAX_ENTRIES_PER_FEED)
+
+            for entry in entries[:max_entries]:
                 process_entry(
                     entry=entry,
                     source_name=source_name,
