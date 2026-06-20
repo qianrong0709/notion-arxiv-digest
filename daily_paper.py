@@ -31,15 +31,47 @@ MAX_TOTAL_PREPRINTS_PER_RUN = 8
 # 部分综合期刊更新量较大。这里增加扫描条数，但仍然要经过关键词筛选；
 # 不是“看见就收”。
 SOURCE_MAX_ENTRIES = {
-    "Nature Communications": 100,
+    "JCIM": 100,
+    "JMC": 100,
+    "JCTC": 100,
+    "Nature Communications": 120,
     "Science": 80,
-    "Science Advances": 80,
-    "PNAS": 80,
-    "Nature Machine Intelligence": 50,
+    "Science Advances": 100,
+    "PNAS": 100,
+    "Nature Machine Intelligence": 80,
     "Nature Computational Science": 50,
-    "Nature Methods": 50,
+    "Nature Methods": 80,
     "Nature Medicine": 50,
     "Nature Biotechnology": 50,
+}
+
+# journal-filtered-v2：源级阈值优先于 tag 级阈值。
+# 正刊仍然经过关键词筛选，只是核心期刊门槛更贴近来源质量。
+SOURCE_MIN_SCORE = {
+    "ArXiv q-bio.BM - Biomolecules": 8,
+    "ArXiv q-bio.QM - Quantitative Methods": 8,
+    "ArXiv physics.chem-ph - Chemical Physics": 8,
+    "JCIM": 2,
+    "JMC": 2,
+    "JCTC": 2,
+    "Digital Discovery": 2,
+    "Journal of Cheminformatics": 2,
+    "Nature Machine Intelligence": 3,
+    "Nature Computational Science": 3,
+    "Nature Communications": 4,
+    "PNAS": 4,
+    "Science Advances": 4,
+    "Nature Methods": 4,
+}
+
+DEBUG_SOURCES = {
+    "JCIM",
+    "JMC",
+    "JCTC",
+    "Nature Machine Intelligence",
+    "Nature Communications",
+    "PNAS",
+    "Science Advances",
 }
 
 # 默认跳过博客源，避免 OpenAI / DeepMind / HF 等动态把 Notion 塞满。
@@ -75,7 +107,7 @@ NOTION_ENTRY_TYPE_PROPERTY = None       # 例："Type"，select
 # 结构说明：
 #   key: 你想在 Notion Source 字段里显示的来源名
 #   url: RSS 地址
-#   tag: 来源大类：aidd / ml / nlp / cv / agent / general / blog / custom
+#   tag: 来源大类：aidd / ml / general / blog / custom
 #   type: paper / blog / news
 # ============================================================
 
@@ -629,7 +661,7 @@ def get_paper_id(entry):
 
 def keyword_hit(text: str, kw: str) -> bool:
     """
-    严格匹配：用于 LLM/RAG/agent 这类短词，要求左右不是字母数字，避免误命中。
+    严格匹配：用于 BFN/GNN/ESM 这类短词，要求左右不是字母数字，避免误命中。
     普通匹配：大小写不敏感子串匹配。
     """
     text = text or ""
@@ -702,20 +734,53 @@ def relevance_score(matched_keywords, strong_keywords):
     return score
 
 
-def should_keep_entry(text, feed_tag):
+def should_keep_entry(text, feed_tag, source_name=None):
     matched_groups, matched_keywords, strong_keywords = match_keyword_groups(text)
     score = relevance_score(matched_keywords, strong_keywords)
-    min_score = MIN_SCORE_BY_TAG.get(feed_tag, MIN_SCORE_BY_TAG.get(None, 5))
+    min_score = SOURCE_MIN_SCORE.get(
+        source_name,
+        MIN_SCORE_BY_TAG.get(feed_tag, MIN_SCORE_BY_TAG.get(None, 5)),
+    )
 
     if not matched_keywords:
-        return False, matched_groups, matched_keywords, strong_keywords, score
+        return (
+            False,
+            matched_groups,
+            matched_keywords,
+            strong_keywords,
+            score,
+            min_score,
+            "no_keyword_match",
+        )
 
     # 综合大刊和博客噪声较大：必须有强关键词，不能只靠 benchmark/evaluation/generative 这种泛词入库。
     if feed_tag in {"general", "blog"} and not strong_keywords:
-        return False, matched_groups, matched_keywords, strong_keywords, score
+        return (
+            False,
+            matched_groups,
+            matched_keywords,
+            strong_keywords,
+            score,
+            min_score,
+            "no_strong_keyword",
+        )
 
     keep = score >= min_score
-    return keep, matched_groups, matched_keywords, strong_keywords, score
+    reason = "kept" if keep else "score_below_source_min"
+    return keep, matched_groups, matched_keywords, strong_keywords, score, min_score, reason
+
+
+def debug_skip_entry(source_name, reason, title, score, matched_keywords, strong_keywords, min_score=None):
+    if source_name not in DEBUG_SOURCES:
+        return
+
+    min_score_text = f", min_score={min_score}" if min_score is not None else ""
+    print(
+        "   🧪 DEBUG skip "
+        f"source={source_name}, reason={reason}, title={title[:120]!r}, "
+        f"score={score}{min_score_text}, "
+        f"matched_keywords={matched_keywords}, strong_keywords={strong_keywords}"
+    )
 
 
 # ============================================================
@@ -999,12 +1064,12 @@ def summarize_blog_or_news(title, abstract, matched_groups=None, score=None):
     topics = ", ".join(matched_groups or [])
 
     prompt = f"""
-你是 AI 药物发现、人工智能和大模型方向的博士生。请根据下面的标题和摘要/简介，写一段中文摘要，供 Notion 每日科研动态数据库快速浏览使用。
+你是 AI 药物发现、计算化学和结构生物学方向的博士生。请根据下面的标题和摘要/简介，写一段中文摘要，供 Notion 每日科研动态数据库快速浏览使用。
 
 写作要求：
 1. 只基于标题和简介，不要补充原文中没有的信息。
 2. 不要写成营销文案，不要使用“重磅”“颠覆”“炸裂”“太强了”等夸张表达。
-3. 优先说明：这是什么动态、涉及什么技术方向、对 AI 药物发现 / NLP / CV / 智能体是否可能有参考价值。
+3. 优先说明：这是什么动态、涉及什么技术方向、对 AI 药物发现 / 计算化学 / 蛋白结构生物学是否可能有参考价值。
 4. 如果信息不足，就明确写“简介中未提供技术细节”。
 5. 控制在 70–110 字。
 
@@ -1075,6 +1140,15 @@ def process_entry(
             return False
 
         if not raw_url:
+            debug_skip_entry(
+                source_name=source_name,
+                reason="missing_url",
+                title=title,
+                score=None,
+                min_score=None,
+                matched_keywords=[],
+                strong_keywords=[],
+            )
             print(f"   ⚠️ 跳过无 URL 记录: {title[:60]}...")
             counters["skipped_error"] += 1
             return False
@@ -1083,16 +1157,43 @@ def process_entry(
         paper_id = get_paper_id(entry)
 
         text_content = f"{title} {abstract}"
-        keep, matched_groups, matched_keywords, strong_keywords, score = should_keep_entry(
+        (
+            keep,
+            matched_groups,
+            matched_keywords,
+            strong_keywords,
+            score,
+            min_score,
+            filter_reason,
+        ) = should_keep_entry(
             text=text_content,
             feed_tag=feed_tag,
+            source_name=source_name,
         )
 
         if not keep:
+            debug_skip_entry(
+                source_name=source_name,
+                reason=filter_reason,
+                title=title,
+                score=score,
+                min_score=min_score,
+                matched_keywords=matched_keywords,
+                strong_keywords=strong_keywords,
+            )
             counters["skipped_keyword"] += 1
             return False
 
         if paper_id in seen_paper_ids:
+            debug_skip_entry(
+                source_name=source_name,
+                reason="duplicate_in_current_run",
+                title=title,
+                score=score,
+                min_score=min_score,
+                matched_keywords=matched_keywords,
+                strong_keywords=strong_keywords,
+            )
             print(f"   💨 本次运行已见过: {title[:60]}... [{paper_id}]")
             counters["skipped_existing"] += 1
             return False
@@ -1107,6 +1208,15 @@ def process_entry(
         )
 
         if exists:
+            debug_skip_entry(
+                source_name=source_name,
+                reason="already_exists_in_notion",
+                title=title,
+                score=score,
+                min_score=min_score,
+                matched_keywords=matched_keywords,
+                strong_keywords=strong_keywords,
+            )
             print(f"   💨 已存在: {title[:60]}... [{paper_id}]")
             counters["skipped_existing"] += 1
             return False
@@ -1217,7 +1327,7 @@ def run():
 
             status = getattr(feed, "status", 200)
             if status not in {200, 301, 302, 304}:
-                print(f" [❌ 失败: 状态码 {status}]")
+                print(f" [❌ 失败: source_name={source_name}, status_code={status}]")
                 counters["feed_error"] += 1
                 continue
 
