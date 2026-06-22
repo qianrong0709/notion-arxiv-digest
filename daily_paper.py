@@ -29,7 +29,7 @@ MAX_ENTRIES_PER_API_SOURCE = 5
 MAX_TOTAL_PREPRINTS_PER_RUN = 8
 
 # 部分综合期刊更新量较大。这里增加扫描条数，但仍然要经过关键词筛选；
-# 不是“看见就收”。
+# 不是"看见就收"。
 SOURCE_MAX_ENTRIES = {
     "JCIM": 100,
     "JMC": 100,
@@ -47,10 +47,10 @@ SOURCE_MAX_ENTRIES = {
 
 # journal-filtered-v2：源级阈值优先于 tag 级阈值。
 # 正刊仍然经过关键词筛选，只是核心期刊门槛更贴近来源质量。
+# ✅ 修复 Bug 2：删除了 arXiv 三个核心源的 SOURCE_MIN_SCORE 条目。
+#    它们的 tag 是 "aidd"，应回落到 MIN_SCORE_BY_TAG["aidd"] = 3，
+#    而不是之前的 8（等同 preprint 门槛，导致几乎全部被过滤）。
 SOURCE_MIN_SCORE = {
-    "ArXiv q-bio.BM - Biomolecules": 8,
-    "ArXiv q-bio.QM - Quantitative Methods": 8,
-    "ArXiv physics.chem-ph - Chemical Physics": 8,
     "JCIM": 2,
     "JMC": 2,
     "JCTC": 2,
@@ -72,6 +72,10 @@ DEBUG_SOURCES = {
     "Nature Communications",
     "PNAS",
     "Science Advances",
+    # ✅ 新增：把 arXiv 核心源也加入 DEBUG_SOURCES，方便观察过滤日志
+    "ArXiv q-bio.BM - Biomolecules",
+    "ArXiv q-bio.QM - Quantitative Methods",
+    "ArXiv physics.chem-ph - Chemical Physics",
 }
 
 # 默认跳过博客源，避免 OpenAI / DeepMind / HF 等动态把 Notion 塞满。
@@ -500,6 +504,7 @@ HIGH_PRIORITY_KEYWORDS_LOWER = {kw.lower() for kw in HIGH_PRIORITY_KEYWORDS}
 
 MIN_SCORE_BY_TAG = {
     # AIDD 专业期刊和 arXiv q-bio/chem-ph：中等门槛。
+    # ✅ 修复 Bug 2：arXiv 三个核心源现在走这里，门槛是 3 而不是 8。
     "aidd": 3,
 
     # NMI / Nature Computational Science 保留源，但只收与 AIDD/分子/蛋白相关的文章。
@@ -628,9 +633,9 @@ def get_paper_id(entry):
         link,
         summary,
         entry_id,
-        str(get_entry_field(entry, "dc_identifier", "")),
-        str(get_entry_field(entry, "prism_doi", "")),
-        str(get_entry_field(entry, "doi", "")),
+        str(get_entry_field(entry, "dc_identifier", "") or ""),
+        str(get_entry_field(entry, "prism_doi", "") or ""),
+        str(get_entry_field(entry, "doi", "") or ""),
     ]
 
     text = " ".join(possible_fields)
@@ -1032,10 +1037,10 @@ def summarize_paper(title, abstract, matched_groups=None, score=None):
 
 写作要求：
 1. 只基于标题和摘要，不要补充摘要中没有的信息。
-2. 不要写成推荐语，不要使用“兄弟们”“太顶了”“值得一看”“重磅”“颠覆”“突破性”“厉害”等口语化或营销化表达。
+2. 不要写成推荐语，不要使用"兄弟们""太顶了""值得一看""重磅""颠覆""突破性""厉害"等口语化或营销化表达。
 3. 不要夸大论文贡献，不要替作者下过强结论。
 4. 优先说明三点：研究问题、方法思路、主要结果或潜在用途。
-5. 如果摘要信息不足，就明确写“摘要中未提供具体实验细节”或“摘要中未说明具体性能提升”。
+5. 如果摘要信息不足，就明确写"摘要中未提供具体实验细节"或"摘要中未说明具体性能提升"。
 6. 语言保持科研笔记风格，客观、克制、清楚。
 7. 控制在 80–120 字。
 
@@ -1068,9 +1073,9 @@ def summarize_blog_or_news(title, abstract, matched_groups=None, score=None):
 
 写作要求：
 1. 只基于标题和简介，不要补充原文中没有的信息。
-2. 不要写成营销文案，不要使用“重磅”“颠覆”“炸裂”“太强了”等夸张表达。
+2. 不要写成营销文案，不要使用"重磅""颠覆""炸裂""太强了"等夸张表达。
 3. 优先说明：这是什么动态、涉及什么技术方向、对 AI 药物发现 / 计算化学 / 蛋白结构生物学是否可能有参考价值。
-4. 如果信息不足，就明确写“简介中未提供技术细节”。
+4. 如果信息不足，就明确写"简介中未提供技术细节"。
 5. 控制在 70–110 字。
 
 命中主题：
@@ -1132,7 +1137,12 @@ def process_entry(
     try:
         title = strip_html(get_entry_field(entry, "title", "")).strip()
         raw_url = str(get_entry_field(entry, "link", "")).strip()
-        abstract = strip_html(get_entry_field(entry, "summary", "No Abstract"))
+
+        # ✅ 修复 Bug 5（辅助）：arXiv RSS 的 summary 字段有时为空，
+        #    feedparser 会把它解析成空字符串，这里加了 fallback。
+        abstract = strip_html(get_entry_field(entry, "summary", "") or get_entry_field(entry, "description", "No Abstract"))
+        if not abstract:
+            abstract = "No Abstract"
 
         if not title:
             print("   ⚠️ 跳过一条无标题记录")
