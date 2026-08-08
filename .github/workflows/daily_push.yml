@@ -2,15 +2,20 @@ name: AIDD Paper Daily Bot
 
 on:
   schedule:
-    # 每天北京时间早上 8 点运行，也就是 UTC 时间 0 点
-    - cron: '17 8 * * *'
+    # 每天北京时间早上 8:00 运行
+    - cron: '0 8 * * *'
       timezone: 'Asia/Shanghai'
+
+  # 支持在 GitHub Actions 页面手动运行
   workflow_dispatch:
 
 jobs:
   run_bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+
+    # 新版会扫描多个期刊、Crossref、bioRxiv、ChemRxiv，
+    # 并调用 DeepSeek 和 Notion，留 30 分钟更稳妥。
+    timeout-minutes: 30
 
     steps:
       - name: Checkout code
@@ -25,6 +30,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Check Python syntax
+        run: |
+          python -m py_compile daily_paper.py
 
       - name: Check secrets
         env:
@@ -44,14 +53,21 @@ jobs:
           missing = [name for name in required if not os.getenv(name)]
 
           if missing:
-              raise SystemExit(f"Missing secrets: {', '.join(missing)}")
+              raise SystemExit(
+                  f"Missing secrets: {', '.join(missing)}"
+              )
 
           print("✅ All required secrets exist.")
           PY
 
-      - name: Run Daily Script
+      - name: Run Daily Paper Bot
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
-        run: python daily_paper.py
+
+          # 让 Python 日志实时显示在 GitHub Actions 中
+          PYTHONUNBUFFERED: "1"
+
+        run: |
+          python daily_paper.py
