@@ -1,1458 +1,1167 @@
-import feedparser
-import os
-import datetime
-import pytz
-import re
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+AIDD Daily Paper Bot
+====================
+
+设计目标：
+1. 只抓取固定白名单期刊、bioRxiv 和 ChemRxiv；
+2. 正式期刊统一通过 Crossref API 按 ISSN 获取最近注册的文章，
+   因而不依赖各出版社不稳定的 RSS/ASAP 页面结构；
+3. 标题 + 摘要命中任意核心关键词即可保留；
+4. 不使用打分、强弱词、来源阈值或多套筛选规则；
+5. DOI / URL / 标题查重后，用 DeepSeek 生成中文摘要并写入 Notion；
+6. DIAGNOSE_ONLY=1 时只诊断，不调用 DeepSeek、不查询或写入 Notion。
+
+Notion 数据库需要以下字段：
+- Title      : title
+- URL        : url
+- Summary    : rich_text
+- Source     : select
+- Date       : date
+- Status     : status
+- InternalID : rich_text
+"""
+
+from __future__ import annotations
+
+import datetime as dt
 import hashlib
 import html
+from html.parser import HTMLParser
 import json
+import os
+import re
 import time
-from urllib.parse import urlparse, urlunparse, urlencode
+from dataclasses import dataclass, field
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
-from openai import OpenAI
+import pytz
 from notion_client import Client
+from openai import OpenAI
 
 
 # ============================================================
-# 配置区域
+# 基础配置
 # ============================================================
 
 TIMEZONE = "Asia/Shanghai"
 
-# 安全诊断模式：DIAGNOSE_ONLY=1 时只抓取和打分，不调用 DeepSeek，不写入 Notion。
-DIAGNOSE_ONLY = os.environ.get("DIAGNOSE_ONLY", "0").lower() in {"1", "true", "yes", "y"}
+# 每天回看最近几天。依靠 DOI/URL/标题查重，重复抓取不会重复入库。
+LOOKBACK_DAYS = 4
 
-# 日常精选模式：不要太高，否则 arXiv 每天会进太多。
-# 如果某天想高召回，可以临时改成 25 或 50。
-MAX_ENTRIES_PER_FEED = 25
-# 预印本单源不要太高，否则 bioRxiv/ChemRxiv 会压过期刊源。
-MAX_ENTRIES_PER_API_SOURCE = 5
-# 每次运行最多入库多少篇预印本，避免 Notion 被 preprint 刷屏。
-MAX_TOTAL_PREPRINTS_PER_RUN = 8
+# Crossref 单个 ISSN 一次最多返回多少条。日期窗口较短，通常远低于该值。
+CROSSREF_ROWS = 500
 
-# 部分综合期刊更新量较大。这里增加扫描条数，但仍然要经过关键词筛选；
-# 不是“看见就收”。
-SOURCE_MAX_ENTRIES = {
-    # ACS / 核心计算化学期刊：多扫一些，避免 latest/ASAP 列表较长时漏掉。
-    "JCIM": 100,
-    "JMC": 100,
-    "JCTC": 100,
-    "ACS Central Science": 80,
-    "ACS Medicinal Chemistry Letters": 80,
-    "ACS Chemical Biology": 80,
-    "Chemical Reviews": 80,
-    "Chemical Science": 80,
-    "Digital Discovery": 80,
-    "Chemical Society Reviews": 80,
-    "RSC Medicinal Chemistry": 80,
-    "Journal of Cheminformatics": 80,
+# Crossref 建议在 User-Agent 中提供联系方式。
+# GitHub Actions 中可选设置 CROSSREF_MAILTO；不设置也能运行。
+CROSSREF_MAILTO = os.environ.get("CROSSREF_MAILTO", "").strip()
 
-    # 综合大刊：更新量大，多扫一些，但仍经过关键词筛选。
-    "Nature Communications": 120,
-    "Science": 100,
-    "Science Advances": 100,
-    "PNAS": 100,
-    "Nature Machine Intelligence": 80,
-    "Nature Computational Science": 80,
-    "Nature Methods": 80,
-    "Nature Medicine": 80,
-    "Nature Biotechnology": 80,
+# Crossref 没有摘要且标题不命中关键词时，尝试从文章页面的 meta 标签补摘要。
+FETCH_MISSING_ABSTRACT_FROM_PAGE = True
+MAX_PAGE_ABSTRACT_FETCHES_PER_JOURNAL = 12
 
-    # Cell Press in press。
-    "Cell Systems - Articles in Press": 50,
-    "Patterns - Articles in Press": 50,
-    "Cell Chemical Biology - Articles in Press": 50,
-    "Cell Reports Medicine - Articles in Press": 50,
+# bioRxiv 最近几天全部扫描，但每天最多新增若干篇，避免预印本淹没正刊。
+MAX_BIORXIV_PER_RUN = 5
+MAX_BIORXIV_PAGES = 25  # 每页通常 100 条
+
+# ChemRxiv 同样只保留关键词相关内容，并限制每天新增数量。
+MAX_CHEMRXIV_PER_RUN = 5
+MAX_CHEMRXIV_PAGES = 20  # 官方 API 每页最多 50 条
+
+# 网络配置
+HTTP_TIMEOUT = 35
+REQUEST_SLEEP_SECONDS = 0.12
+
+# 诊断模式：
+# DIAGNOSE_ONLY=1 python daily_paper.py
+DIAGNOSE_ONLY = os.environ.get("DIAGNOSE_ONLY", "0").lower() in {
+    "1", "true", "yes", "y"
 }
 
-# 单独控制核心正刊阈值：正刊仍然筛选，但核心来源不要和预印本一样严格。
-SOURCE_MIN_SCORE = {
-    "JCIM": 2,
-    "JMC": 2,
-    "JCTC": 2,
-    "ACS Central Science": 2,
-    "ACS Medicinal Chemistry Letters": 2,
-    "ACS Chemical Biology": 2,
-    "Chemical Reviews": 2,
-    "Chemical Science": 2,
-    "Digital Discovery": 2,
-    "Chemical Society Reviews": 2,
-    "RSC Medicinal Chemistry": 2,
-    "Journal of Cheminformatics": 2,
-    "Bioinformatics": 2,
-    "Briefings in Bioinformatics": 2,
-    "Nucleic Acids Research": 2,
-    "Nature Chemistry": 3,
-    "Nature Chemical Biology": 3,
-    "Nature Structural & Molecular Biology": 3,
-    "Nature Reviews Drug Discovery": 3,
-    "Nature Reviews Chemistry": 3,
-    "Nature Machine Intelligence": 3,
-    "Nature Computational Science": 3,
-    "Nature Communications": 4,
-    "Nature Methods": 4,
-    "Nature Medicine": 4,
-    "Nature Biotechnology": 4,
-    "Science": 4,
-    "Science Advances": 4,
-    "Science Translational Medicine": 4,
-    "PNAS": 4,
-    "Cell Systems": 4,
-    "Patterns": 4,
-    "Cell Chemical Biology": 3,
-    "Cell Reports Medicine": 4,
-    "Cell Systems - Articles in Press": 4,
-    "Patterns - Articles in Press": 4,
-    "Cell Chemical Biology - Articles in Press": 3,
-    "Cell Reports Medicine - Articles in Press": 4,
-}
-
-# 这些来源会打印更详细的跳过原因；DIAGNOSE_ONLY=1 时所有来源都会打印诊断信息。
-DEBUG_SOURCES = {
-    "JCIM", "JMC", "JCTC",
-    "ACS Medicinal Chemistry Letters", "ACS Chemical Biology",
-    "Nature Machine Intelligence", "Nature Computational Science",
-    "Nature Communications", "Nature Methods", "Science Advances", "PNAS",
-    "Cell Chemical Biology", "Cell Chemical Biology - Articles in Press",
-}
-
-# 默认跳过博客源，避免 OpenAI / DeepMind / HF 等动态把 Notion 塞满。
-EXCLUDED_FEED_TAGS = {"blog"}
-
-# 默认关闭一部分较宽的 preprint API 源。需要时从这里移除即可。
-EXCLUDED_API_SOURCE_NAMES = {
-    "bioRxiv Molecular Biology",
-    "bioRxiv Synthetic Biology",
-}
-
-# 默认关闭的一些 arXiv 边缘源。
-# 这些源目前没有放进 RSS_FEEDS；保留此项是为了以后重新加入时可直接控制。
-EXCLUDED_FEED_NAMES = {
-    "ArXiv q-bio.MN - Molecular Networks",
-    "ArXiv cond-mat.soft - Soft Matter",
-    "ArXiv cs.NE - Neural and Evolutionary Computing",
-    "ArXiv eess.IV - Image and Video Processing",
-    "ArXiv cs.RO - Robotics",
-    "ArXiv cs.HC - Human-Computer Interaction",
-}
-
-# 如果 Notion 数据库里有这些字段，就填字段名；没有就保持 None。
-# 字段类型必须对应，否则 Notion API 会报错。
-NOTION_TAG_PROPERTY = None              # 例："Tags"，multi_select
-NOTION_TOPIC_PROPERTY = None            # 例："Topics"，multi_select
-NOTION_SCORE_PROPERTY = None            # 例："Score"，number
-NOTION_ENTRY_TYPE_PROPERTY = None       # 例："Type"，select
+# 可选 Notion 字段；数据库中没有就保持 None。
+NOTION_KEYWORDS_PROPERTY = None       # 例："Keywords"，multi_select
+NOTION_ENTRY_TYPE_PROPERTY = None     # 例："Type"，select
 
 
 # ============================================================
-# RSS 源
-# 结构说明：
-#   key: 你想在 Notion Source 字段里显示的来源名
-#   url: RSS 地址
-#   tag: 来源大类：aidd / ml / nlp / cv / agent / general / blog / custom
-#   type: paper / blog / news
+# 期刊白名单
 # ============================================================
 
-RSS_FEEDS = {
-    # ================= arXiv：AIDD / 计算化学 / 生物分子 =================
-    "ArXiv q-bio.BM - Biomolecules": {
-        "url": "https://rss.arxiv.org/rss/q-bio.BM",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "ArXiv q-bio.QM - Quantitative Methods": {
-        "url": "https://rss.arxiv.org/rss/q-bio.QM",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "ArXiv physics.chem-ph - Chemical Physics": {
-        "url": "https://rss.arxiv.org/rss/physics.chem-ph",
-        "tag": "aidd",
-        "type": "paper",
-    },
+# 使用印刷版和电子版 ISSN 双重查询，再按 DOI 去重。
+# Crossref 会覆盖 DOI 正式注册的 online-first / ASAP / early-view 文章。
+JOURNALS: dict[str, tuple[str, ...]] = {
+    # ACS
+    "Chemical Reviews": ("0009-2665", "1520-6890"),
+    "Journal of Medicinal Chemistry": ("0022-2623", "1520-4804"),
+    "Journal of Chemical Information and Modeling": ("1549-9596", "1549-960X"),
+    "Journal of the American Chemical Society": ("0002-7863", "1520-5126"),
 
-    # ================= AIDD / 计算化学 / 药物化学期刊 =================
-    "JCIM": {
-        "url": "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=jcisd8",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "JMC": {
-        "url": "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=jmcmar",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "JCTC": {
-        "url": "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=jctcce",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "ACS Central Science": {
-        "url": "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=acscii",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "ACS Medicinal Chemistry Letters": {
-        "url": "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=amclct",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "ACS Chemical Biology": {
-        "url": "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=acbcct",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "Chemical Reviews": {
-        "url": "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=chreay",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "Chemical Science": {
-        "url": "https://feeds.rsc.org/rss/sc",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "Digital Discovery": {
-        "url": "https://feeds.rsc.org/rss/dd",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "Chemical Society Reviews": {
-        "url": "https://feeds.rsc.org/rss/cs",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "RSC Medicinal Chemistry": {
-        "url": "https://feeds.rsc.org/rss/md",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "Journal of Cheminformatics": {
-        "url": "https://link.springer.com/search.rss?facet-journal-id=13321&channel-name=Journal%20of%20Cheminformatics",
-        "tag": "aidd",
-        "type": "paper",
-    },
+    # Nature Portfolio
+    "Nature": ("0028-0836", "1476-4687"),
+    "Nature Reviews Drug Discovery": ("1474-1776", "1474-1784"),
+    "Nature Reviews Chemistry": ("2397-3358",),
+    "Nature Machine Intelligence": ("2522-5839",),
+    "Nature Computational Science": ("2662-8457",),
+    "Nature Communications": ("2041-1723",),
+    "Nature Medicine": ("1078-8956", "1546-170X"),
+    "Nature Biotechnology": ("1087-0156", "1546-1696"),
+    "Nature Methods": ("1548-7091", "1548-7105"),
 
-    # ================= Nature / Science / Cell / PNAS =================
-    "Nature Machine Intelligence": {
-        "url": "https://www.nature.com/natmachintell.rss",
-        "tag": "ml",
-        "type": "paper",
-    },
-    "Nature Computational Science": {
-        "url": "https://www.nature.com/natcomputsci.rss",
-        "tag": "ml",
-        "type": "paper",
-    },
-    "Nature Chemistry": {
-        "url": "https://www.nature.com/nchem.rss",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "Nature Chemical Biology": {
-        "url": "https://www.nature.com/nchembio.rss",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "Nature Structural & Molecular Biology": {
-        "url": "https://www.nature.com/nsmb.rss",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "Nature Reviews Drug Discovery": {
-        "url": "https://www.nature.com/nrd.rss",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "Nature Reviews Chemistry": {
-        "url": "https://www.nature.com/natrevchem/journal/vaop/ncurrent/rss.rdf",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "Nature Medicine": {
-        "url": "https://www.nature.com/nm/journal/vaop/ncurrent/rss.rdf",
-        "tag": "general",
-        "type": "paper",
-    },
-    "Nature Methods": {
-        "url": "https://www.nature.com/nmeth.rss",
-        "tag": "general",
-        "type": "paper",
-    },
-    "Nature Biotechnology": {
-        "url": "https://www.nature.com/nbt.rss",
-        "tag": "general",
-        "type": "paper",
-    },
-    "Nature Communications": {
-        "url": "https://www.nature.com/ncomms.rss",
-        "tag": "general",
-        "type": "paper",
-    },
-    "Science": {
-        "url": "https://www.science.org/action/showFeed?type=etoc&feed=rss&journalCode=science",
-        "tag": "general",
-        "type": "paper",
-    },
-    "Science Advances": {
-        "url": "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=sciadv",
-        "tag": "general",
-        "type": "paper",
-    },
-    "Science Translational Medicine": {
-        "url": "https://www.science.org/action/showFeed?type=etoc&feed=rss&journalCode=stm",
-        "tag": "general",
-        "type": "paper",
-    },
-    "PNAS": {
-        "url": "https://www.pnas.org/action/showFeed?type=etoc&feed=rss&jc=pnas",
-        "tag": "general",
-        "type": "paper",
-    },
-    "Cell Systems": {
-        "url": "https://www.cell.com/cell-systems/rss",
-        "tag": "general",
-        "type": "paper",
-    },
-    "Patterns": {
-        "url": "https://www.cell.com/patterns/rss",
-        "tag": "general",
-        "type": "paper",
-    },
-    "Cell Chemical Biology": {
-        "url": "https://www.cell.com/cell-chemical-biology/rss",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "Cell Reports Medicine": {
-        "url": "https://www.cell.com/cell-reports-medicine/rss",
-        "tag": "general",
-        "type": "paper",
-    },
+    # Science / PNAS / Wiley / RSC
+    "Science": ("0036-8075", "1095-9203"),
+    "Science Advances": ("2375-2548",),
+    "Advanced Science": ("2198-3844",),
+    "Proceedings of the National Academy of Sciences": ("0027-8424", "1091-6490"),
+    "Angewandte Chemie International Edition": ("1433-7851", "1521-3773"),
+    "Chemical Science": ("2041-6520", "2041-6539"),
+    "Chemical Society Reviews": ("0306-0012", "1460-4744"),
 
-    # Cell Press 的 Articles in Press 通常是单独 RSS；普通 /rss 可能只覆盖 latest/current issue。
-    # 这些源仍然会经过关键词筛选，不是看见就收。
-    "Cell Systems - Articles in Press": {
-        "url": "https://www.cell.com/cell-systems/inpress.rss",
-        "tag": "general",
-        "type": "paper",
-    },
-    "Patterns - Articles in Press": {
-        "url": "https://www.cell.com/patterns/inpress.rss",
-        "tag": "general",
-        "type": "paper",
-    },
-    "Cell Chemical Biology - Articles in Press": {
-        "url": "https://www.cell.com/cell-chemical-biology/inpress.rss",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "Cell Reports Medicine - Articles in Press": {
-        "url": "https://www.cell.com/cell-reports-medicine/inpress.rss",
-        "tag": "general",
-        "type": "paper",
-    },
-
-    # ================= Bioinformatics / Computational Biology =================
-    "Bioinformatics": {
-        "url": "https://academic.oup.com/rss/site_5127/3091.xml",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "Briefings in Bioinformatics": {
-        "url": "https://academic.oup.com/rss/site_5260/3091.xml",
-        "tag": "aidd",
-        "type": "paper",
-    },
-    "Nucleic Acids Research": {
-        "url": "https://academic.oup.com/rss/site_5153/3127.xml",
-        "tag": "aidd",
-        "type": "paper",
-    },
-
-    # ================= 工业界 / 实验室博客 =================
-    # 默认会被 EXCLUDED_FEED_TAGS = {"blog"} 跳过。
-    "Google Research Blog": {
-        "url": "https://research.google/blog/rss/",
-        "tag": "blog",
-        "type": "blog",
-    },
-    "DeepMind Blog": {
-        "url": "https://deepmind.google/blog/rss.xml",
-        "tag": "blog",
-        "type": "blog",
-    },
-    "OpenAI Blog": {
-        "url": "https://openai.com/news/rss.xml",
-        "tag": "blog",
-        "type": "blog",
-    },
-    "Anthropic News": {
-        "url": "https://www.anthropic.com/news/rss.xml",
-        "tag": "blog",
-        "type": "blog",
-    },
-    "Hugging Face Blog": {
-        "url": "https://huggingface.co/blog/feed.xml",
-        "tag": "blog",
-        "type": "blog",
-    },
+    # Cheminformatics / Bioinformatics
+    "Journal of Cheminformatics": ("1758-2946",),
+    "Bioinformatics": ("1367-4803", "1460-2059"),
 }
 
 
 # ============================================================
-# 你后续新增期刊 RSS 地址就放这里
+# 核心关键词
 # ============================================================
 
-USER_CUSTOM_RSS_FEEDS = {
-    # "期刊或来源名称": {
-    #     "url": "https://example.com/rss.xml",
-    #     "tag": "aidd",
-    #     "type": "paper",
-    # },
+# 唯一筛选规则：
+# 标题 + 摘要命中任意一个关键词，就保留。
+CORE_KEYWORDS = [
+    # AIDD / 计算机辅助药物设计
+    "drug discovery",
+    "drug design",
+    "ai drug discovery",
+    "ai-driven drug discovery",
+    "artificial intelligence for drug discovery",
+    "machine learning for drug discovery",
+    "deep learning for drug discovery",
+    "AIDD",
+    "computer-aided drug design",
+    "computer aided drug design",
+    "CADD",
+    "structure-based drug design",
+    "structure based drug design",
+    "SBDD",
+    "ligand-based drug design",
+    "ligand based drug design",
+    "in silico drug design",
+    "molecular design",
+    "molecule design",
+    "small-molecule design",
+    "small molecule design",
+    "de novo drug design",
+    "de novo molecular design",
+    "lead optimization",
+    "hit discovery",
+    "medicinal chemistry",
+    "cheminformatics",
+
+    # 分子生成与优化
+    "molecular generation",
+    "molecule generation",
+    "molecular generative",
+    "generative molecular",
+    "de novo molecule generation",
+    "de novo molecular generation",
+    "3d molecular generation",
+    "3d molecule generation",
+    "structure-based molecular generation",
+    "structure based molecular generation",
+    "pocket-conditioned",
+    "pocket conditioned",
+    "molecular optimization",
+    "molecule optimization",
+    "molecular foundation model",
+
+    # 蛋白–配体、口袋与虚拟筛选
+    "protein-ligand",
+    "protein ligand",
+    "protein–ligand",
+    "ligand-protein",
+    "ligand protein",
+    "protein–small molecule",
+    "protein-small molecule",
+    "protein small molecule",
+    "protein-ligand complex",
+    "protein ligand complex",
+    "binding pocket",
+    "binding site",
+    "binding affinity",
+    "binding mode",
+    "molecular docking",
+    "docking",
+    "virtual screening",
+    "structure-based virtual screening",
+    "structure based virtual screening",
+    "scoring function",
+    "interaction fingerprint",
+    "pharmacophore",
+
+    # 计算化学与性质预测
+    "molecular dynamics",
+    "binding free energy",
+    "free energy perturbation",
+    "alchemical free energy",
+    "FEP",
+    "ADMET",
+    "QSAR",
+    "molecular property prediction",
+    "activity prediction",
+    "force field",
+    "conformation generation",
+    "conformer generation",
+    "molecular representation learning",
+
+    # 三维与几何学习
+    "3d molecule",
+    "3d molecular",
+    "geometric deep learning",
+    "equivariant neural network",
+    "equivariant graph",
+    "SE(3)",
+    "E(3)",
+    "molecular diffusion model",
+    "diffusion model for molecular generation",
+    "flow matching for molecular",
+    "molecular flow matching",
+    "Bayesian flow network",
+    "BFN",
+    "molecular graph neural network",
+    "molecular graph transformer",
+
+    # 蛋白设计与结构生物学
+    "protein design",
+    "protein generation",
+    "protein language model",
+    "protein foundation model",
+    "protein structure prediction",
+    "protein folding",
+    "inverse folding",
+    "AlphaFold",
+    "RFdiffusion",
+    "RoseTTAFold",
+    "ESM",
+    "Boltz",
+    "Chai",
+    "cryo-EM",
+    "electron density",
+    "electron cloud",
+    "density map",
+    "X-ray crystallography",
+    "X ray crystallography",
+    "macromolecular crystallography",
+]
+
+STRICT_KEYWORDS = {
+    "AIDD", "CADD", "SBDD", "FEP", "ADMET", "QSAR",
+    "SE(3)", "E(3)", "BFN", "ESM",
 }
+STRICT_KEYWORDS_LOWER = {word.lower() for word in STRICT_KEYWORDS}
 
-RSS_FEEDS.update(USER_CUSTOM_RSS_FEEDS)
-
-
-# ============================================================
-# API 源：bioRxiv / ChemRxiv
-# 这些不是 RSS_FEEDS，不能用 feedparser 直接解析。
-# ============================================================
-
-API_SOURCES = {
-    # ================= bioRxiv =================
-    # 建议只抓最近 3 天，并按 category 限制，否则数量会很多。
-    "bioRxiv Bioinformatics": {
-        "provider": "biorxiv",
-        "server": "biorxiv",
-        "category": "bioinformatics",
-        "days": 1,
-        "tag": "preprint",
-        "type": "paper",
-    },
-    "bioRxiv Biophysics": {
-        "provider": "biorxiv",
-        "server": "biorxiv",
-        "category": "biophysics",
-        "days": 1,
-        "tag": "preprint",
-        "type": "paper",
-    },
-    "bioRxiv Molecular Biology": {
-        "provider": "biorxiv",
-        "server": "biorxiv",
-        "category": "molecular biology",
-        "days": 1,
-        "tag": "preprint",
-        "type": "paper",
-    },
-    "bioRxiv Biochemistry": {
-        "provider": "biorxiv",
-        "server": "biorxiv",
-        "category": "biochemistry",
-        "days": 1,
-        "tag": "preprint",
-        "type": "paper",
-    },
-    "bioRxiv Synthetic Biology": {
-        "provider": "biorxiv",
-        "server": "biorxiv",
-        "category": "synthetic biology",
-        "days": 1,
-        "tag": "preprint",
-        "type": "paper",
-    },
-
-    # ================= ChemRxiv =================
-    # 只保留与你更相关的分类；仍会经过关键词筛选。
-    "ChemRxiv AIDD / Computational Chemistry": {
-        "provider": "chemrxiv",
-        "url": "https://chemrxiv.org/engage/chemrxiv/public-api/v1/items",
-        "days": 3,
-        "allowed_categories": {
-            "Biological and Medicinal Chemistry",
-            "Theoretical and Computational Chemistry",
-            "Computational Chemistry",
-            "Cheminformatics",
-        },
-        "tag": "preprint",
-        "type": "paper",
-    },
-}
+# 不入库的内容类型。
+EXCLUDED_TITLE_PREFIXES = (
+    "correction:",
+    "publisher correction:",
+    "author correction:",
+    "erratum:",
+    "retraction:",
+    "expression of concern:",
+)
 
 
 # ============================================================
-# 关键词分组
-# 逻辑：
-#   - 先判断命中哪些主题组
-#   - 再计算相关性分数
-#   - general/blog 源要求至少命中强关键词，避免噪声过大
+# 数据结构
 # ============================================================
 
-KEYWORD_GROUPS = {
-    "AIDD / Drug Design": [
-        "drug discovery", "drug design", "ai drug discovery", "AIDD",
-        "molecular generation", "molecule generation", "molecular design",
-        "de novo design", "de novo drug design",
-        "structure-based drug design", "structure based drug design", "SBDD",
-        "ligand-based", "ligand based", "binding pocket", "binding site",
-        "protein-ligand", "protein ligand", "protein–ligand",
-        "binding affinity", "docking", "molecular docking", "virtual screening",
-        "molecular dynamics", "free energy", "FEP", "ADMET", "QSAR",
-        "lead optimization", "hit discovery", "small molecule",
-        "fragment-based", "fragment based", "pharmacophore",
-        "interaction fingerprint", "molecular property prediction",
-        "activity prediction", "scoring function", "force field",
-        "medicinal chemistry", "chemical biology", "cheminformatics",
-    ],
+@dataclass
+class Article:
+    title: str
+    abstract: str
+    url: str
+    doi: str
+    published_date: str
+    source: str
+    entry_type: str = "journal"
+    matched_keywords: list[str] = field(default_factory=list)
 
-    "3D Molecular / Generative Modeling": [
-        "3D molecule", "3D molecular", "conformation generation",
-        "conformer generation", "geometric deep learning", "equivariant",
-        "E(3)", "SE(3)", "SO(3)", "diffusion model", "diffusion",
-        "flow matching", "rectified flow", "score-based", "score based",
-        "Bayesian flow network", "BFN", "graph neural network", "GNN",
-        "message passing", "graph transformer", "molecular graph",
-        "molecular representation", "pocket-conditioned", "pocket conditioned",
-    ],
+    @property
+    def internal_id(self) -> str:
+        if self.doi:
+            return f"doi:{normalize_doi(self.doi)}"
+        if self.url:
+            return f"url:{canonicalize_url(self.url)}"
+        digest = hashlib.sha1(normalize_title(self.title).encode("utf-8")).hexdigest()[:20]
+        return f"title:{digest}"
 
-    "Protein / Structural Biology": [
-        "protein design", "protein generation", "protein language model",
-        "protein structure prediction", "protein folding", "inverse folding",
-        "AlphaFold", "RFdiffusion", "RoseTTAFold", "ESM", "Boltz", "Chai",
-        "structure prediction", "cryo-EM", "electron density", "density map",
-        "X-ray crystallography", "binding site", "protein-ligand complex",
-    ],
-}
+
+@dataclass
+class SourceStats:
+    fetched: int = 0
+    keyword_matched: int = 0
+    page_abstract_fetched: int = 0
+    duplicate_in_run: int = 0
+    already_in_notion: int = 0
+    inserted: int = 0
+    would_insert: int = 0
+    errors: int = 0
 
 
 # ============================================================
-# 关键词匹配强弱设置
+# 文本和日期工具
 # ============================================================
 
-STRICT_MATCH_KEYWORDS = {
-    "BFN", "GNN", "FEP", "QSAR", "ADMET", "SE(3)",
-    "E(3)", "SO(3)", "ESM",
-}
-STRICT_MATCH_KEYWORDS_LOWER = {kw.lower() for kw in STRICT_MATCH_KEYWORDS}
+def strip_html(text: Any) -> str:
+    if not text:
+        return ""
+    value = html.unescape(str(text))
+    value = re.sub(r"<[^>]+>", " ", value)
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
 
-# 弱关键词不能单独让 general/blog 源入库。
-WEAK_KEYWORDS = {
-    "diffusion", "diffusion model", "score-based", "score based",
-    "graph neural network", "GNN", "message passing",
-    "molecular representation", "structure prediction",
-}
-WEAK_KEYWORDS_LOWER = {kw.lower() for kw in WEAK_KEYWORDS}
 
-# 高优先级关键词：命中后相关性加权更高。
-HIGH_PRIORITY_KEYWORDS = {
-    "structure-based drug design", "molecular generation", "de novo drug design",
-    "protein-ligand", "binding pocket", "binding site", "virtual screening",
-    "ADMET", "molecular docking", "binding affinity",
-    "protein design", "protein generation", "protein language model",
-    "protein structure prediction", "electron density", "density map",
-    "pocket-conditioned", "pocket conditioned",
-    "flow matching", "rectified flow", "graph transformer", "equivariant",
-    "cheminformatics", "medicinal chemistry", "chemical biology",
-}
-HIGH_PRIORITY_KEYWORDS_LOWER = {kw.lower() for kw in HIGH_PRIORITY_KEYWORDS}
+def normalize_search_text(text: str) -> str:
+    value = html.unescape(text or "")
+    value = value.replace("–", "-").replace("—", "-").replace("−", "-")
+    value = re.sub(r"\s+", " ", value)
+    return value.lower().strip()
+
+
+def normalize_doi(doi: str) -> str:
+    value = (doi or "").strip().lower()
+    value = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", value)
+    value = re.sub(r"^doi:\s*", "", value)
+    return value.rstrip(".,; ")
+
+
+def canonicalize_url(url: str) -> str:
+    if not url:
+        return ""
+    parsed = urlparse(url.strip())
+    netloc = parsed.netloc.lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    path = parsed.path.rstrip("/")
+    return urlunparse(("https", netloc, path, "", "", ""))
+
+
+def normalize_title(title: str) -> str:
+    value = normalize_search_text(title)
+    value = re.sub(r"[^a-z0-9\u4e00-\u9fff ]", "", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def keyword_hit(text: str, keyword: str) -> bool:
+    normalized_text = normalize_search_text(text)
+    normalized_keyword = normalize_search_text(keyword)
+
+    if normalized_keyword in STRICT_KEYWORDS_LOWER:
+        pattern = rf"(?<![a-z0-9]){re.escape(normalized_keyword)}(?![a-z0-9])"
+        return re.search(pattern, normalized_text, flags=re.IGNORECASE) is not None
+
+    return normalized_keyword in normalized_text
+
+
+def match_core_keywords(title: str, abstract: str) -> list[str]:
+    text = f"{title} {abstract}"
+    matched: list[str] = []
+    seen: set[str] = set()
+
+    for keyword in CORE_KEYWORDS:
+        if keyword_hit(text, keyword):
+            key = keyword.lower()
+            if key not in seen:
+                matched.append(keyword)
+                seen.add(key)
+
+    return matched
+
+
+def should_skip_title(title: str) -> bool:
+    normalized = normalize_search_text(title)
+    return any(normalized.startswith(prefix) for prefix in EXCLUDED_TITLE_PREFIXES)
+
+
+def crossref_date_to_iso(item: dict[str, Any]) -> str:
+    for field_name in (
+        "published-online",
+        "published",
+        "published-print",
+        "issued",
+        "created",
+    ):
+        value = item.get(field_name)
+        if not isinstance(value, dict):
+            continue
+
+        date_parts = value.get("date-parts")
+        if date_parts and isinstance(date_parts, list) and date_parts[0]:
+            parts = date_parts[0]
+            year = int(parts[0])
+            month = int(parts[1]) if len(parts) > 1 else 1
+            day = int(parts[2]) if len(parts) > 2 else 1
+            try:
+                return dt.date(year, month, day).isoformat()
+            except ValueError:
+                continue
+
+        date_time = value.get("date-time")
+        if date_time:
+            try:
+                return dt.datetime.fromisoformat(
+                    str(date_time).replace("Z", "+00:00")
+                ).date().isoformat()
+            except ValueError:
+                continue
+
+    return dt.date.today().isoformat()
 
 
 # ============================================================
-# 不同来源的最低入库分数
+# HTTP 工具
 # ============================================================
 
-MIN_SCORE_BY_TAG = {
-    # AIDD 专业期刊和 arXiv q-bio/chem-ph：中等门槛。
-    "aidd": 3,
+def user_agent() -> str:
+    base = "AIDD-Daily-Paper-Bot/2.0"
+    if CROSSREF_MAILTO:
+        return f"{base} (mailto:{CROSSREF_MAILTO})"
+    return base
 
-    # NMI / Nature Computational Science 保留源，但只收与 AIDD/分子/蛋白相关的文章。
-    "ml": 4,
 
-    # 综合期刊保留源，但必须命中较明确的 AIDD/结构生物关键词。
-    "general": 5,
+def fetch_json(url: str, *, retries: int = 3) -> dict[str, Any]:
+    headers = {
+        "User-Agent": user_agent(),
+        "Accept": "application/json",
+    }
 
-    # 预印本数量大，必须更相关才入库。
-    "preprint": 8,
+    last_error: Exception | None = None
+    for attempt in range(retries):
+        try:
+            request = Request(url, headers=headers)
+            with urlopen(request, timeout=HTTP_TIMEOUT) as response:
+                charset = response.headers.get_content_charset() or "utf-8"
+                return json.loads(response.read().decode(charset))
+        except HTTPError as exc:
+            last_error = exc
+            # 429 / 5xx 可重试；其他错误直接抛出。
+            if exc.code != 429 and exc.code < 500:
+                raise
+        except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+            last_error = exc
 
-    "blog": 8,
-    "custom": 5,
-    None: 5,
-}
+        time.sleep(1.5 * (attempt + 1))
+
+    raise RuntimeError(f"请求失败: {url}; last_error={last_error}")
+
+
+class MetaDescriptionParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.values: dict[str, str] = {}
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "meta":
+            return
+
+        attr_map = {
+            (key or "").lower(): (value or "")
+            for key, value in attrs
+        }
+        key = (
+            attr_map.get("name")
+            or attr_map.get("property")
+            or attr_map.get("itemprop")
+        ).lower()
+        content = attr_map.get("content", "").strip()
+        if key and content and key not in self.values:
+            self.values[key] = content
+
+
+def fetch_page_abstract(url: str) -> str:
+    if not url:
+        return ""
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml",
+    }
+
+    try:
+        request = Request(url, headers=headers)
+        with urlopen(request, timeout=HTTP_TIMEOUT) as response:
+            charset = response.headers.get_content_charset() or "utf-8"
+            body = response.read(2_500_000).decode(charset, errors="replace")
+    except Exception:
+        return ""
+
+    parser = MetaDescriptionParser()
+    try:
+        parser.feed(body)
+    except Exception:
+        return ""
+
+    keys = (
+        "citation_abstract",
+        "dc.description",
+        "dcterms.description",
+        "description",
+        "og:description",
+        "twitter:description",
+    )
+    for key in keys:
+        value = strip_html(parser.values.get(key, ""))
+        if len(value) >= 40:
+            return value
+
+    return ""
 
 
 # ============================================================
-# 初始化客户端
+# Crossref：正式期刊抓取
 # ============================================================
 
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
-NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
-DATABASE_ID = os.environ.get("DATABASE_ID")
+def build_crossref_url(issn: str, start_date: str, end_date: str) -> str:
+    filters = ",".join(
+        [
+            f"from-created-date:{start_date}",
+            f"until-created-date:{end_date}",
+            "type:journal-article",
+        ]
+    )
+    params = {
+        "filter": filters,
+        "rows": str(CROSSREF_ROWS),
+        "sort": "created",
+        "order": "desc",
+    }
+    if CROSSREF_MAILTO:
+        params["mailto"] = CROSSREF_MAILTO
 
-if not DIAGNOSE_ONLY:
-    if not DEEPSEEK_API_KEY:
-        raise RuntimeError("❌ 缺少环境变量 DEEPSEEK_API_KEY")
+    return f"https://api.crossref.org/journals/{issn}/works?{urlencode(params)}"
 
-    if not NOTION_TOKEN:
-        raise RuntimeError("❌ 缺少环境变量 NOTION_TOKEN")
 
-    if not DATABASE_ID:
-        raise RuntimeError("❌ 缺少环境变量 DATABASE_ID")
+def crossref_item_to_article(item: dict[str, Any], source: str) -> Article | None:
+    title_values = item.get("title") or []
+    title = strip_html(title_values[0] if title_values else "")
+    if not title or should_skip_title(title):
+        return None
+
+    doi = normalize_doi(str(item.get("DOI", "")))
+    url = str(item.get("URL", "") or "").strip()
+    if not url and doi:
+        url = f"https://doi.org/{doi}"
+
+    if not url:
+        return None
+
+    abstract = strip_html(item.get("abstract", ""))
+    published_date = crossref_date_to_iso(item)
+
+    return Article(
+        title=title,
+        abstract=abstract,
+        url=url,
+        doi=doi,
+        published_date=published_date,
+        source=source,
+        entry_type="journal",
+    )
+
+
+def fetch_journal_articles(
+    source: str,
+    issns: tuple[str, ...],
+    start_date: str,
+    end_date: str,
+) -> tuple[list[Article], int]:
+    by_id: dict[str, Article] = {}
+    errors = 0
+
+    for issn in issns:
+        url = build_crossref_url(issn, start_date, end_date)
+        try:
+            payload = fetch_json(url)
+            items = payload.get("message", {}).get("items", [])
+        except Exception as exc:
+            errors += 1
+            print(f"   ⚠️ Crossref 请求失败: {source} / ISSN {issn}: {exc}")
+            continue
+
+        for item in items:
+            article = crossref_item_to_article(item, source)
+            if article is None:
+                continue
+            by_id[article.internal_id] = article
+
+        time.sleep(REQUEST_SLEEP_SECONDS)
+
+    articles = sorted(
+        by_id.values(),
+        key=lambda article: (article.published_date, article.title),
+        reverse=True,
+    )
+    return articles, errors
+
+
+# ============================================================
+# bioRxiv 抓取
+# ============================================================
+
+def fetch_biorxiv_articles(start_date: str, end_date: str) -> tuple[list[Article], int]:
+    by_id: dict[str, Article] = {}
+    errors = 0
+
+    for page_index in range(MAX_BIORXIV_PAGES):
+        cursor = page_index * 100
+        url = (
+            "https://api.biorxiv.org/details/"
+            f"biorxiv/{start_date}/{end_date}/{cursor}"
+        )
+
+        try:
+            payload = fetch_json(url)
+        except Exception as exc:
+            errors += 1
+            print(f"   ⚠️ bioRxiv API 请求失败 cursor={cursor}: {exc}")
+            break
+
+        collection = payload.get("collection", [])
+        if not collection:
+            break
+
+        for item in collection:
+            title = strip_html(item.get("title", ""))
+            doi = normalize_doi(str(item.get("doi", "")))
+            if not title or not doi or should_skip_title(title):
+                continue
+
+            abstract = strip_html(item.get("abstract", ""))
+            date_text = str(item.get("date", "") or end_date)[:10]
+            article = Article(
+                title=title,
+                abstract=abstract,
+                url=f"https://www.biorxiv.org/content/{doi}",
+                doi=doi,
+                published_date=date_text,
+                source="bioRxiv",
+                entry_type="preprint",
+            )
+
+            # 同一 DOI 多个版本只保留 API 后返回/日期更新的一条。
+            by_id[article.internal_id] = article
+
+        if len(collection) < 100:
+            break
+
+        time.sleep(REQUEST_SLEEP_SECONDS)
+
+    articles = sorted(
+        by_id.values(),
+        key=lambda article: (article.published_date, article.title),
+        reverse=True,
+    )
+    return articles, errors
+
+
+
+# ============================================================
+# ChemRxiv 抓取
+# ============================================================
+
+CHEMRXIV_API_URL = "https://chemrxiv.org/engage/chemrxiv/public-api/v1/items"
+
+
+def chemrxiv_date_to_iso(item: dict[str, Any], fallback: str) -> str:
+    """
+    ChemRxiv 元数据中的日期字段在不同版本中可能略有差异。
+    优先使用 publishedDate，其次 approvedDate / submittedDate。
+    """
+    for field_name in ("publishedDate", "approvedDate", "submittedDate", "createdDate"):
+        value = item.get(field_name)
+        if not value:
+            continue
+
+        text = str(value).strip()
+        if len(text) >= 10:
+            candidate = text[:10]
+            try:
+                dt.date.fromisoformat(candidate)
+                return candidate
+            except ValueError:
+                pass
+
+    return fallback
+
+
+def fetch_chemrxiv_articles(start_date: str, end_date: str) -> tuple[list[Article], int]:
+    """
+    使用 ChemRxiv 官方 Open Engage Public API 抓取最近日期窗口内的预印本。
+
+    API:
+      /public-api/v1/items
+    主要参数:
+      searchDateFrom / searchDateTo / skip / limit / sort
+
+    返回结果在不同 API 版本中可能使用 itemHits / items / results，
+    因此这里做兼容解析。
+    """
+    by_id: dict[str, Article] = {}
+    errors = 0
+    page_size = 50
+
+    for page_index in range(MAX_CHEMRXIV_PAGES):
+        skip = page_index * page_size
+        params = {
+            "searchDateFrom": start_date,
+            "searchDateTo": end_date,
+            "sort": "PUBLISHED_DATE_DESC",
+            "skip": str(skip),
+            "limit": str(page_size),
+        }
+        url = f"{CHEMRXIV_API_URL}?{urlencode(params)}"
+
+        try:
+            payload = fetch_json(url)
+        except Exception as exc:
+            errors += 1
+            print(f"   ⚠️ ChemRxiv API 请求失败 skip={skip}: {exc}")
+            break
+
+        hits = (
+            payload.get("itemHits")
+            or payload.get("items")
+            or payload.get("results")
+            or []
+        )
+
+        if not isinstance(hits, list) or not hits:
+            break
+
+        parsed_count = 0
+
+        for hit in hits:
+            if not isinstance(hit, dict):
+                continue
+
+            item = hit.get("item", hit)
+            if not isinstance(item, dict):
+                continue
+
+            title = strip_html(item.get("title", ""))
+            if not title or should_skip_title(title):
+                continue
+
+            abstract = strip_html(item.get("abstract", ""))
+            doi = normalize_doi(str(item.get("doi", "") or ""))
+            item_id = str(item.get("id", "") or item.get("_id", "") or "").strip()
+
+            url_value = ""
+            for key in ("url", "itemUrl", "landingPageUrl"):
+                value = str(item.get(key, "") or "").strip()
+                if value:
+                    url_value = value
+                    break
+
+            if not url_value and item_id:
+                url_value = (
+                    "https://chemrxiv.org/engage/chemrxiv/"
+                    f"article-details/{item_id}"
+                )
+
+            if not url_value and doi:
+                url_value = f"https://doi.org/{doi}"
+
+            if not url_value:
+                continue
+
+            article = Article(
+                title=title,
+                abstract=abstract,
+                url=url_value,
+                doi=doi,
+                published_date=chemrxiv_date_to_iso(item, end_date),
+                source="ChemRxiv",
+                entry_type="preprint",
+            )
+
+            by_id[article.internal_id] = article
+            parsed_count += 1
+
+        # 如果 API 本页不足 page_size，说明已经到最后一页。
+        if len(hits) < page_size:
+            break
+
+        # 即使返回 50 条但一条都无法解析，也不继续死循环。
+        if parsed_count == 0:
+            break
+
+        time.sleep(REQUEST_SLEEP_SECONDS)
+
+    articles = sorted(
+        by_id.values(),
+        key=lambda article: (article.published_date, article.title),
+        reverse=True,
+    )
+    return articles, errors
+
+
+# ============================================================
+# Notion 与 DeepSeek
+# ============================================================
+
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
+DATABASE_ID = os.environ.get("DATABASE_ID", "")
+
+if DIAGNOSE_ONLY:
+    deepseek_client: OpenAI | None = None
+    notion: Client | None = None
+else:
+    missing = [
+        name
+        for name, value in {
+            "DEEPSEEK_API_KEY": DEEPSEEK_API_KEY,
+            "NOTION_TOKEN": NOTION_TOKEN,
+            "DATABASE_ID": DATABASE_ID,
+        }.items()
+        if not value
+    ]
+    if missing:
+        raise RuntimeError(f"❌ 缺少环境变量: {', '.join(missing)}")
 
     deepseek_client = OpenAI(
         api_key=DEEPSEEK_API_KEY,
         base_url="https://api.deepseek.com",
     )
-
     notion = Client(auth=NOTION_TOKEN)
-else:
-    print("🧪 DIAGNOSE_ONLY=1：只抓取和打分，不调用 DeepSeek，不写入 Notion。")
-    deepseek_client = None
-    notion = None
 
 
-# ============================================================
-# 论文 ID 规范化函数
-# ============================================================
+def check_if_exists(article: Article) -> bool:
+    if notion is None:
+        return False
 
-DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+\b", re.I)
-
-ARXIV_RE = re.compile(
-    r"(?:arxiv\.org/(?:abs|pdf)/|arxiv:|oai:arXiv\.org:)?"
-    r"([a-z\-]+/\d{7}|\d{4}\.\d{4,5})(?:v\d+)?",
-    re.I,
-)
-
-
-def strip_html(text):
-    if not text:
-        return ""
-    text = html.unescape(str(text))
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
-
-
-def canonicalize_url(url):
-    """
-    规范化 URL：
-    - http/https 统一成 https
-    - 去掉 query 和 fragment
-    - 去掉 www
-    - arXiv pdf 链接统一成 abs 链接
-    """
-    if not url:
-        return ""
-
-    parsed = urlparse(url)
-    netloc = parsed.netloc.lower()
-
-    if netloc.startswith("www."):
-        netloc = netloc[4:]
-
-    path = parsed.path.rstrip("/")
-
-    if "arxiv.org" in netloc:
-        path = path.replace("/pdf/", "/abs/")
-        if path.endswith(".pdf"):
-            path = path[:-4]
-
-    return urlunparse(("https", netloc, path, "", "", ""))
-
-
-def normalize_title(title):
-    if not title:
-        return ""
-
-    title = title.lower().strip()
-    title = re.sub(r"\s+", " ", title)
-    title = re.sub(r"[^a-z0-9\u4e00-\u9fff ]", "", title)
-    return title
-
-
-def get_entry_field(entry, key, default=""):
-    try:
-        return entry.get(key, default)
-    except Exception:
-        return getattr(entry, key, default)
-
-
-def get_paper_id(entry):
-    """
-    为每篇文章生成稳定 InternalID。
-
-    优先级：
-    1. DOI
-    2. arXiv ID
-    3. 规范化 URL
-    4. 标题 hash
-    """
-    title = get_entry_field(entry, "title", "") or ""
-    link = get_entry_field(entry, "link", "") or ""
-    summary = get_entry_field(entry, "summary", "") or ""
-    entry_id = get_entry_field(entry, "id", "") or ""
-
-    possible_fields = [
-        title,
-        link,
-        summary,
-        entry_id,
-        str(get_entry_field(entry, "dc_identifier", "")),
-        str(get_entry_field(entry, "prism_doi", "")),
-        str(get_entry_field(entry, "doi", "")),
+    filters: list[dict[str, Any]] = [
+        {
+            "property": "InternalID",
+            "rich_text": {"equals": article.internal_id},
+        },
+        {
+            "property": "URL",
+            "url": {"equals": canonicalize_url(article.url)},
+        },
+        {
+            "property": "Title",
+            "title": {"equals": article.title},
+        },
     ]
 
-    text = " ".join(possible_fields)
-
-    doi_match = DOI_RE.search(text)
-    if doi_match:
-        doi = doi_match.group(0).lower().rstrip(".")
-        return f"doi:{doi}"
-
-    arxiv_text = " ".join([link, entry_id])
-    arxiv_match = ARXIV_RE.search(arxiv_text)
-    if arxiv_match:
-        arxiv_id = arxiv_match.group(1).lower()
-        return f"arxiv:{arxiv_id}"
-
-    if link:
-        return f"url:{canonicalize_url(link)}"
-
-    clean_title = normalize_title(title)
-    title_hash = hashlib.sha1(clean_title.encode("utf-8")).hexdigest()[:16]
-    return f"title:{title_hash}"
-
-
-# ============================================================
-# 关键词匹配与相关性评分
-# ============================================================
-
-
-def keyword_hit(text: str, kw: str) -> bool:
-    """
-    严格匹配：用于 LLM/RAG/agent 这类短词，要求左右不是字母数字，避免误命中。
-    普通匹配：大小写不敏感子串匹配。
-    """
-    text = text or ""
-    kw = kw or ""
-    kw_lower = kw.lower()
-
-    if kw_lower in STRICT_MATCH_KEYWORDS_LOWER:
-        pattern = rf"(?<![A-Za-z0-9]){re.escape(kw)}(?![A-Za-z0-9])"
-        return re.search(pattern, text, flags=re.IGNORECASE) is not None
-
-    return kw_lower in text.lower()
-
-
-def match_keyword_groups(text: str):
-    """
-    返回：
-    - matched_groups: 命中的主题组
-    - matched_keywords: 所有命中的关键词
-    - strong_keywords: 非弱关键词
-    """
-    matched_groups = []
-    matched_keywords = []
-
-    for group_name, keywords in KEYWORD_GROUPS.items():
-        group_hits = []
-        for kw in keywords:
-            if keyword_hit(text, kw):
-                group_hits.append(kw)
-
-        if group_hits:
-            matched_groups.append(group_name)
-            matched_keywords.extend(group_hits)
-
-    # 去重但保留顺序
-    seen = set()
-    unique_keywords = []
-    for kw in matched_keywords:
-        key = kw.lower()
-        if key not in seen:
-            unique_keywords.append(kw)
-            seen.add(key)
-
-    strong_keywords = [
-        kw for kw in unique_keywords
-        if kw.lower() not in WEAK_KEYWORDS_LOWER
-    ]
-
-    return matched_groups, unique_keywords, strong_keywords
-
-
-def relevance_score(matched_keywords, strong_keywords):
-    """
-    简单可解释打分：
-    - 弱关键词：+1
-    - 强关键词：+2
-    - 高优先级关键词：额外 +2
-    """
-    score = 0
-
-    for kw in matched_keywords:
-        kw_lower = kw.lower()
-        if kw_lower in WEAK_KEYWORDS_LOWER:
-            score += 1
-        else:
-            score += 2
-
-        if kw_lower in HIGH_PRIORITY_KEYWORDS_LOWER:
-            score += 2
-
-    return score
-
-
-def should_keep_entry(text, feed_tag, source_name=None):
-    """
-    Keyword-match based filtering.
-
-    当前逻辑：
-    1. 不再使用 score 阈值决定是否入库；
-    2. 只要命中当前保留关键词组中的关键词，就进入后续查重/入库流程；
-    3. 对 general / ml / blog / preprint 这类较宽来源，不能只命中弱关键词；
-    4. score 仍然保留，用于日志、Notion 可选字段和诊断观察。
-    """
-    matched_groups, matched_keywords, strong_keywords = match_keyword_groups(text)
-
-    # score 只用于 debug、日志和 Notion 可选字段；不再用于 keep / skip 判断。
-    score = relevance_score(matched_keywords, strong_keywords)
-
-    if not matched_keywords:
-        return False, matched_groups, matched_keywords, strong_keywords, score
-
-    # 对较宽来源，不能只靠弱关键词入库。
-    # 例如只命中 diffusion / GNN / structure prediction 这类泛词，不够稳。
-    if feed_tag in {"general", "ml", "blog", "preprint"} and not strong_keywords:
-        return False, matched_groups, matched_keywords, strong_keywords, score
-
-    return True, matched_groups, matched_keywords, strong_keywords, score
-
-
-# ============================================================
-# Notion 相关函数
-# ============================================================
-
-
-def check_if_exists(paper_id, canonical_url, raw_url, title):
-    """
-    三层查重：
-    1. InternalID 查重：新数据最稳
-    2. URL 查重：兼容旧数据
-    3. Title 查重：兜底兼容旧数据
-    """
-    filters = [
-        {"property": "InternalID", "rich_text": {"equals": paper_id}},
-        {"property": "URL", "url": {"equals": canonical_url}},
-        {"property": "Title", "title": {"equals": title}},
-    ]
-
-    if raw_url and raw_url != canonical_url:
-        filters.append({"property": "URL", "url": {"equals": raw_url}})
+    if article.url != canonicalize_url(article.url):
+        filters.append(
+            {
+                "property": "URL",
+                "url": {"equals": article.url},
+            }
+        )
 
     response = notion.databases.query(
         database_id=DATABASE_ID,
         filter={"or": filters},
         page_size=1,
     )
-
-    return len(response.get("results", [])) > 0
-
-
-def push_to_notion(
-    title,
-    url,
-    summary,
-    source,
-    date_str,
-    paper_id,
-    feed_tag=None,
-    entry_type="paper",
-    matched_groups=None,
-    score=None,
-):
-    """
-    Notion 必需字段：
-    - Title      : title
-    - URL        : url
-    - Summary    : rich_text
-    - Source     : select
-    - Date       : date
-    - Status     : status
-    - InternalID : rich_text
-
-    可选字段：
-    - NOTION_TAG_PROPERTY        : multi_select
-    - NOTION_TOPIC_PROPERTY      : multi_select
-    - NOTION_SCORE_PROPERTY      : number
-    - NOTION_ENTRY_TYPE_PROPERTY : select
-    """
-    properties = {
-        "Title": {"title": [{"text": {"content": title[:2000]}}]},
-        "URL": {"url": url},
-        "Summary": {"rich_text": [{"text": {"content": summary[:2000]}}]},
-        "Source": {"select": {"name": source}},
-        "Date": {"date": {"start": date_str}},
-        "Status": {"status": {"name": "Inbox"}},
-        "InternalID": {"rich_text": [{"text": {"content": paper_id[:2000]}}]},
-    }
-
-    if NOTION_TAG_PROPERTY and feed_tag:
-        properties[NOTION_TAG_PROPERTY] = {
-            "multi_select": [{"name": str(feed_tag)}]
-        }
-
-    if NOTION_TOPIC_PROPERTY and matched_groups:
-        properties[NOTION_TOPIC_PROPERTY] = {
-            "multi_select": [{"name": group[:100]} for group in matched_groups]
-        }
-
-    if NOTION_SCORE_PROPERTY and score is not None:
-        properties[NOTION_SCORE_PROPERTY] = {"number": float(score)}
-
-    if NOTION_ENTRY_TYPE_PROPERTY and entry_type:
-        properties[NOTION_ENTRY_TYPE_PROPERTY] = {"select": {"name": entry_type}}
-
-    notion.pages.create(
-        parent={"database_id": DATABASE_ID},
-        properties=properties,
-    )
-
-    print(f"✅ 已入库: {title[:60]}... [{paper_id}] score={score}")
+    return bool(response.get("results"))
 
 
-# ============================================================
-# API 源抓取：bioRxiv / ChemRxiv
-# ============================================================
+def call_deepseek(article: Article) -> str:
+    if deepseek_client is None:
+        raise RuntimeError("DeepSeek 客户端未初始化")
 
-
-def fetch_json(url, headers=None):
-    req = Request(
-        url,
-        headers=headers or {
-            "User-Agent": "Mozilla/5.0 (compatible; AIDD-Daily-Bot/1.0)",
-            "Accept": "application/json",
-        },
-    )
-    with urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
-def parse_iso_date(date_text):
-    if not date_text:
-        return None
-
-    date_text = str(date_text).replace("Z", "+00:00")
-
-    try:
-        return datetime.datetime.fromisoformat(date_text)
-    except Exception:
-        pass
-
-    try:
-        return datetime.datetime.strptime(str(date_text)[:10], "%Y-%m-%d")
-    except Exception:
-        return None
-
-
-def fetch_biorxiv_entries(source_info, today_dt):
-    days = int(source_info.get("days", 3))
-    server = source_info.get("server", "biorxiv")
-    category = source_info.get("category")
-
-    start_date = (today_dt - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
-    end_date = today_dt.strftime("%Y-%m-%d")
-
-    base_url = f"https://api.biorxiv.org/details/{server}/{start_date}/{end_date}/0"
-
-    if category:
-        base_url += "?" + urlencode({"category": category})
-
-    data = fetch_json(base_url)
-    collection = data.get("collection", [])
-
-    entries = []
-    for item in collection:
-        doi = item.get("doi", "")
-        title = item.get("title", "")
-        abstract = item.get("abstract", "")
-        category_name = item.get("category", "")
-        date_text = item.get("date", "")
-
-        if not title or not doi:
-            continue
-
-        entries.append({
-            "title": title,
-            "link": f"https://www.biorxiv.org/content/{doi}",
-            "summary": abstract,
-            "id": doi,
-            "doi": doi,
-            "date": date_text,
-            "source_category": category_name,
-        })
-
-    return entries
-
-
-def fetch_chemrxiv_entries(source_info, today_dt):
-    url = source_info["url"]
-    allowed_categories = set(source_info.get("allowed_categories", set()))
-    days = int(source_info.get("days", 7))
-    cutoff_dt = today_dt - datetime.timedelta(days=days)
-
-    data = fetch_json(url)
-    hits = data.get("itemHits", [])
-
-    entries = []
-    for hit in hits:
-        item = hit.get("item", {})
-        if not item:
-            continue
-
-        categories = {
-            c.get("name", "")
-            for c in item.get("categories", [])
-            if c.get("name")
-        }
-
-        if allowed_categories and not (categories & allowed_categories):
-            continue
-
-        published_date = item.get("publishedDate") or item.get("approvedDate") or item.get("submittedDate")
-        parsed_date = parse_iso_date(published_date)
-        if parsed_date is not None:
-            # 去掉时区，方便和 today_dt 比较。
-            parsed_naive = parsed_date.replace(tzinfo=None)
-            today_naive = today_dt.replace(tzinfo=None)
-            cutoff_naive = cutoff_dt.replace(tzinfo=None)
-            if parsed_naive < cutoff_naive or parsed_naive > today_naive + datetime.timedelta(days=1):
-                continue
-
-        item_id = item.get("id", "")
-        doi = item.get("doi", "")
-        title = item.get("title", "")
-        abstract = item.get("abstract", "")
-
-        if not title or not item_id:
-            continue
-
-        entries.append({
-            "title": title,
-            "link": f"https://chemrxiv.org/engage/chemrxiv/article-details/{item_id}",
-            "summary": abstract,
-            "id": doi or item_id,
-            "doi": doi,
-            "date": published_date,
-            "source_category": "; ".join(sorted(categories)),
-        })
-
-    return entries
-
-
-def fetch_api_entries(source_info, today_dt):
-    provider = source_info.get("provider")
-
-    if provider == "biorxiv":
-        return fetch_biorxiv_entries(source_info, today_dt)
-
-    if provider == "chemrxiv":
-        return fetch_chemrxiv_entries(source_info, today_dt)
-
-    return []
-
-
-# ============================================================
-# DeepSeek 总结函数
-# ============================================================
-
-
-def summarize_paper(title, abstract, matched_groups=None, score=None):
-    """用 DeepSeek 生成克制、客观的论文摘要。"""
-    print(f"🤖 正在总结论文: {title[:60]}...")
-
-    topics = ", ".join(matched_groups or [])
+    abstract = article.abstract or "摘要未提供。"
+    keywords = ", ".join(article.matched_keywords)
 
     prompt = f"""
-你是 AI 药物发现、计算化学和机器学习方向的博士生。请根据下面论文的标题和摘要，写一段中文摘要，供 Notion 文献数据库快速浏览使用。
+你是 AI 药物发现、计算化学和结构生物学方向的博士生。请仅根据论文标题和摘要写一段中文科研笔记摘要。
 
-写作要求：
-1. 只基于标题和摘要，不要补充摘要中没有的信息。
-2. 不要写成推荐语，不要使用“兄弟们”“太顶了”“值得一看”“重磅”“颠覆”“突破性”“厉害”等口语化或营销化表达。
-3. 不要夸大论文贡献，不要替作者下过强结论。
-4. 优先说明三点：研究问题、方法思路、主要结果或潜在用途。
-5. 如果摘要信息不足，就明确写“摘要中未提供具体实验细节”或“摘要中未说明具体性能提升”。
-6. 语言保持科研笔记风格，客观、克制、清楚。
-7. 控制在 80–120 字。
+要求：
+1. 只基于提供的标题和摘要，不补充未出现的信息。
+2. 依次说明研究问题、方法思路、主要结果或潜在用途。
+3. 如果没有摘要，明确写“当前元数据未提供摘要，具体方法和结果需查看原文”。
+4. 不使用“重磅、颠覆、突破性、值得一看”等营销化措辞。
+5. 语言客观、克制、清楚，控制在 90–140 字。
+6. 直接输出摘要正文，不要加标题或分点。
 
-命中主题：
-{topics}
-
-相关性分数：
-{score}
+期刊/来源：{article.source}
+发表日期：{article.published_date}
+命中关键词：{keywords}
 
 标题：
-{title}
+{article.title}
 
 摘要：
 {abstract}
+""".strip()
 
-请直接输出摘要正文，不要加标题，不要分点。
-"""
-
-    return call_deepseek(prompt)
-
-
-def summarize_blog_or_news(title, abstract, matched_groups=None, score=None):
-    """用于博客、新闻和工业界动态，不强行写成论文摘要。"""
-    print(f"🤖 正在总结动态: {title[:60]}...")
-
-    topics = ", ".join(matched_groups or [])
-
-    prompt = f"""
-你是 AI 药物发现、人工智能和大模型方向的博士生。请根据下面的标题和摘要/简介，写一段中文摘要，供 Notion 每日科研动态数据库快速浏览使用。
-
-写作要求：
-1. 只基于标题和简介，不要补充原文中没有的信息。
-2. 不要写成营销文案，不要使用“重磅”“颠覆”“炸裂”“太强了”等夸张表达。
-3. 优先说明：这是什么动态、涉及什么技术方向、对 AI 药物发现 / NLP / CV / 智能体是否可能有参考价值。
-4. 如果信息不足，就明确写“简介中未提供技术细节”。
-5. 控制在 70–110 字。
-
-命中主题：
-{topics}
-
-相关性分数：
-{score}
-
-标题：
-{title}
-
-简介：
-{abstract}
-
-请直接输出摘要正文，不要加标题，不要分点。
-"""
-
-    return call_deepseek(prompt)
-
-
-def call_deepseek(prompt):
     try:
         response = deepseek_client.chat.completions.create(
             model="deepseek-chat",
             messages=[
                 {
                     "role": "system",
-                    "content": "你是一个严谨的科研文献摘要助手，输出必须客观、克制、避免宣传语。",
+                    "content": "你是严谨的 AIDD 科研文献摘要助手。",
                 },
                 {"role": "user", "content": prompt},
             ],
             temperature=0.2,
-            max_tokens=260,
+            max_tokens=320,
         )
-
         return response.choices[0].message.content.strip()
+    except Exception as exc:
+        print(f"   ⚠️ DeepSeek 总结失败: {exc}")
+        return "AI 总结失败，请查看原文。"
 
-    except Exception as e:
-        print(f"❌ LLM Error: {e}")
-        return "AI 总结失败，请人工查看。"
+
+def push_to_notion(article: Article, summary: str) -> None:
+    if notion is None:
+        raise RuntimeError("Notion 客户端未初始化")
+
+    properties: dict[str, Any] = {
+        "Title": {
+            "title": [{"text": {"content": article.title[:2000]}}],
+        },
+        "URL": {
+            "url": canonicalize_url(article.url),
+        },
+        "Summary": {
+            "rich_text": [{"text": {"content": summary[:2000]}}],
+        },
+        "Source": {
+            "select": {"name": article.source[:100]},
+        },
+        "Date": {
+            "date": {"start": article.published_date},
+        },
+        "Status": {
+            "status": {"name": "Inbox"},
+        },
+        "InternalID": {
+            "rich_text": [{"text": {"content": article.internal_id[:2000]}}],
+        },
+    }
+
+    if NOTION_KEYWORDS_PROPERTY and article.matched_keywords:
+        properties[NOTION_KEYWORDS_PROPERTY] = {
+            "multi_select": [
+                {"name": keyword[:100]}
+                for keyword in article.matched_keywords[:20]
+            ]
+        }
+
+    if NOTION_ENTRY_TYPE_PROPERTY:
+        properties[NOTION_ENTRY_TYPE_PROPERTY] = {
+            "select": {"name": article.entry_type}
+        }
+
+    notion.pages.create(
+        parent={"database_id": DATABASE_ID},
+        properties=properties,
+    )
 
 
 # ============================================================
-# 单条记录处理函数
+# 统一处理逻辑
 # ============================================================
 
+def process_source_articles(
+    source: str,
+    articles: list[Article],
+    stats: SourceStats,
+    seen_ids: set[str],
+    *,
+    max_insertions: int | None = None,
+) -> None:
+    page_fallback_count = 0
 
-def process_entry(
-    entry,
-    source_name,
-    feed_tag,
-    entry_type,
-    today,
-    seen_paper_ids,
-    counters,
-):
-    title = ""
+    for article in articles:
+        stats.fetched += 1
 
-    try:
-        title = strip_html(get_entry_field(entry, "title", "")).strip()
-        raw_url = str(get_entry_field(entry, "link", "")).strip()
-        abstract = strip_html(
-            get_entry_field(entry, "summary", "")
-            or get_entry_field(entry, "description", "")
-            or "No Abstract"
-        )
+        matched = match_core_keywords(article.title, article.abstract)
 
-        if not title:
-            print("   ⚠️ 跳过一条无标题记录")
-            counters["skipped_error"] += 1
-            return False
+        # Crossref 没有摘要、标题也没命中时，从文章页面 meta 信息补一次摘要。
+        if (
+            not matched
+            and not article.abstract
+            and FETCH_MISSING_ABSTRACT_FROM_PAGE
+            and page_fallback_count < MAX_PAGE_ABSTRACT_FETCHES_PER_JOURNAL
+        ):
+            page_fallback_count += 1
+            page_abstract = fetch_page_abstract(article.url)
+            if page_abstract:
+                article.abstract = page_abstract
+                stats.page_abstract_fetched += 1
+                matched = match_core_keywords(article.title, article.abstract)
 
-        if not raw_url:
-            print(f"   ⚠️ 跳过无 URL 记录: {title[:60]}...")
-            counters["skipped_error"] += 1
-            return False
+        if not matched:
+            continue
 
-        canonical_url = canonicalize_url(raw_url)
-        paper_id = get_paper_id(entry)
+        article.matched_keywords = matched
+        stats.keyword_matched += 1
 
-        text_content = f"{title} {abstract}"
-        keep, matched_groups, matched_keywords, strong_keywords, score = should_keep_entry(
-            text=text_content,
-            feed_tag=feed_tag,
-            source_name=source_name,
-        )
-
-        debug_this = DIAGNOSE_ONLY or source_name in DEBUG_SOURCES
-        if debug_this:
-            print(
-                f"   🔍 DEBUG: {title[:100]} | keep={keep} | score={score} | "
-                f"keyword_mode=True | "
-                f"topics={matched_groups} | keywords={matched_keywords[:10]} | strong={strong_keywords[:10]}"
-            )
-
-        if not keep:
-            counters["skipped_keyword"] += 1
-            if debug_this:
-                print(f"   🔕 关键词/分数过滤: {title[:100]}...")
-            return False
-
-        if paper_id in seen_paper_ids:
-            print(f"   💨 本次运行已见过: {title[:60]}... [{paper_id}]")
-            counters["skipped_existing"] += 1
-            return False
-
-        seen_paper_ids.add(paper_id)
+        if article.internal_id in seen_ids:
+            stats.duplicate_in_run += 1
+            continue
+        seen_ids.add(article.internal_id)
 
         if DIAGNOSE_ONLY:
+            stats.would_insert += 1
             print(
-                f"   🟢 WOULD_INSERT source={source_name}, "
-                f"title={title[:120]!r}, score={score}, "
-                f"keyword_mode=True, "
-                f"matched_keywords={matched_keywords[:10]}, strong_keywords={strong_keywords[:10]} "
-                f"[{paper_id}]"
+                f"   🟢 WOULD_INSERT | {article.published_date} | "
+                f"{article.title[:110]} | keywords={matched[:8]}"
             )
-            counters["would_insert"] += 1
-            return True
+            if max_insertions is not None and stats.would_insert >= max_insertions:
+                break
+            continue
 
-        exists = check_if_exists(
-            paper_id=paper_id,
-            canonical_url=canonical_url,
-            raw_url=raw_url,
-            title=title,
-        )
+        try:
+            if check_if_exists(article):
+                stats.already_in_notion += 1
+                continue
 
-        if exists:
-            print(f"   💨 已存在: {title[:60]}... [{paper_id}]")
-            counters["skipped_existing"] += 1
-            return False
-
-        if entry_type in {"blog", "news"}:
-            summary = summarize_blog_or_news(
-                title=title,
-                abstract=abstract,
-                matched_groups=matched_groups,
-                score=score,
-            )
-        else:
-            summary = summarize_paper(
-                title=title,
-                abstract=abstract,
-                matched_groups=matched_groups,
-                score=score,
+            summary = call_deepseek(article)
+            push_to_notion(article, summary)
+            stats.inserted += 1
+            print(
+                f"   ✅ 已入库 | {article.published_date} | "
+                f"{article.title[:100]}"
             )
 
-        push_to_notion(
-            title=title,
-            url=canonical_url,
-            summary=summary,
-            source=source_name,
-            date_str=today,
-            paper_id=paper_id,
-            feed_tag=feed_tag,
-            entry_type=entry_type,
-            matched_groups=matched_groups,
-            score=score,
-        )
+            if max_insertions is not None and stats.inserted >= max_insertions:
+                break
 
-        print(
-            f"   🔎 topics={matched_groups}; "
-            f"strong={strong_keywords[:5]}; score={score}"
-        )
+        except Exception as exc:
+            stats.errors += 1
+            print(f"   ❌ 处理失败: {article.title[:90]} | {exc}")
 
-        counters["new"] += 1
-        return True
 
-    except Exception as e:
-        print(f"   ❌ 单篇处理失败: {title[:60] if title else '未知标题'}")
-        print(f"      错误: {e}")
-        counters["skipped_error"] += 1
-        return False
+def print_source_stats(source: str, stats: SourceStats) -> None:
+    print(
+        f"📊 {source}: "
+        f"抓取={stats.fetched}, "
+        f"关键词命中={stats.keyword_matched}, "
+        f"页面补摘要={stats.page_abstract_fetched}, "
+        f"本轮重复={stats.duplicate_in_run}, "
+        f"Notion已存在={stats.already_in_notion}, "
+        f"新增={stats.inserted}, "
+        f"诊断应入库={stats.would_insert}, "
+        f"错误={stats.errors}"
+    )
 
 
 # ============================================================
 # 主程序
 # ============================================================
 
-
-def run():
-    print("🚀 开始抓取每日论文 / 科研动态...")
-    if DIAGNOSE_ONLY:
-        print("🧪 当前为诊断模式：不会写入 Notion。")
-
+def run() -> None:
     tz = pytz.timezone(TIMEZONE)
-    today_dt = datetime.datetime.now(tz)
-    today = today_dt.strftime("%Y-%m-%d")
+    now = dt.datetime.now(tz)
+    end_date = now.date()
+    start_date = end_date - dt.timedelta(days=LOOKBACK_DAYS)
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept": (
-            "text/html,application/xhtml+xml,application/xml;q=0.9,"
-            "image/avif,image/webp,image/apng,*/*;q=0.8"
-        ),
-    }
+    start_text = start_date.isoformat()
+    end_text = end_date.isoformat()
 
-    seen_paper_ids = set()
+    print("=" * 76)
+    print("🚀 AIDD Daily Paper Bot")
+    print(f"日期窗口: {start_text} 至 {end_text}")
+    print("筛选规则: 标题 + 摘要命中任意一个核心关键词即可")
+    print(f"诊断模式: {DIAGNOSE_ONLY}")
+    print("=" * 76)
 
-    counters = {
-        "new": 0,
-        "skipped_existing": 0,
-        "skipped_keyword": 0,
-        "skipped_error": 0,
-        "feed_error": 0,
-        "preprint_new": 0,
-        "would_insert": 0,
-    }
+    seen_ids: set[str] = set()
+    all_stats: dict[str, SourceStats] = {}
 
-    # ================= RSS 源 =================
+    # 1. 正式期刊
+    for source, issns in JOURNALS.items():
+        print(f"\n📚 正在抓取: {source}")
+        stats = SourceStats()
+        all_stats[source] = stats
 
-    for source_name, feed_info in RSS_FEEDS.items():
-        if source_name in EXCLUDED_FEED_NAMES:
-            print("\n⏭️ 跳过来源: {}，如需启用请从 EXCLUDED_FEED_NAMES 中移除".format(source_name))
-            continue
+        articles, fetch_errors = fetch_journal_articles(
+            source=source,
+            issns=issns,
+            start_date=start_text,
+            end_date=end_text,
+        )
+        stats.errors += fetch_errors
 
-        # 兼容旧格式：若值是字符串则当作纯 URL
-        if isinstance(feed_info, str):
-            feed_url = feed_info
-            feed_tag = None
-            entry_type = "paper"
-        else:
-            feed_url = feed_info["url"]
-            feed_tag = feed_info.get("tag")
-            entry_type = feed_info.get("type", "paper")
+        process_source_articles(
+            source=source,
+            articles=articles,
+            stats=stats,
+            seen_ids=seen_ids,
+        )
+        print_source_stats(source, stats)
 
-        if feed_tag in EXCLUDED_FEED_TAGS:
-            print("\n⏭️ 跳过来源: {} [{}]，如需启用请修改 EXCLUDED_FEED_TAGS".format(source_name, feed_tag))
-            continue
+    # 2. bioRxiv
+    source = "bioRxiv"
+    print(f"\n🧪 正在抓取: {source}")
+    stats = SourceStats()
+    all_stats[source] = stats
 
-        print("\n📡 正在扫描: {} [{} / {}] ...".format(source_name, feed_tag or "-", entry_type), end="")
+    articles, fetch_errors = fetch_biorxiv_articles(start_text, end_text)
+    stats.errors += fetch_errors
 
-        try:
-            feed = feedparser.parse(feed_url, request_headers=headers)
+    process_source_articles(
+        source=source,
+        articles=articles,
+        stats=stats,
+        seen_ids=seen_ids,
+        max_insertions=MAX_BIORXIV_PER_RUN,
+    )
+    print_source_stats(source, stats)
 
-            status = getattr(feed, "status", 200)
-            if status not in {200, 301, 302, 304}:
-                print(f" [❌ 失败: 状态码 {status}] url={feed_url}")
-                counters["feed_error"] += 1
-                continue
+    # 3. ChemRxiv
+    source = "ChemRxiv"
+    print(f"\n🧪 正在抓取: {source}")
+    stats = SourceStats()
+    all_stats[source] = stats
 
-            entries = getattr(feed, "entries", [])
-            entry_count = len(entries)
+    articles, fetch_errors = fetch_chemrxiv_articles(start_text, end_text)
+    stats.errors += fetch_errors
 
-            print(f" [✅ 连接成功，发现 {entry_count} 条记录]")
+    process_source_articles(
+        source=source,
+        articles=articles,
+        stats=stats,
+        seen_ids=seen_ids,
+        max_insertions=MAX_CHEMRXIV_PER_RUN,
+    )
+    print_source_stats(source, stats)
 
-            if entry_count == 0:
-                print("   ⚠️ 源是通的，但没有解析到记录，可能今天没更新或 RSS 格式变化")
-                continue
+    # 4. 总结
+    totals = SourceStats()
+    for stats in all_stats.values():
+        totals.fetched += stats.fetched
+        totals.keyword_matched += stats.keyword_matched
+        totals.page_abstract_fetched += stats.page_abstract_fetched
+        totals.duplicate_in_run += stats.duplicate_in_run
+        totals.already_in_notion += stats.already_in_notion
+        totals.inserted += stats.inserted
+        totals.would_insert += stats.would_insert
+        totals.errors += stats.errors
 
-            max_entries = SOURCE_MAX_ENTRIES.get(source_name, MAX_ENTRIES_PER_FEED)
-
-            for entry in entries[:max_entries]:
-                process_entry(
-                    entry=entry,
-                    source_name=source_name,
-                    feed_tag=feed_tag,
-                    entry_type=entry_type,
-                    today=today,
-                    seen_paper_ids=seen_paper_ids,
-                    counters=counters,
-                )
-
-        except Exception as e:
-            print(f"\n⚠️ RSS 源解析出错: {source_name}, 错误: {e}")
-            counters["feed_error"] += 1
-            continue
-
-    # ================= API 源：bioRxiv / ChemRxiv =================
-
-    for source_name, source_info in API_SOURCES.items():
-        if source_name in EXCLUDED_API_SOURCE_NAMES:
-            print("\n⏭️ 跳过 API 来源: {}，如需启用请从 EXCLUDED_API_SOURCE_NAMES 中移除".format(source_name))
-            continue
-
-        if counters.get("preprint_new", 0) >= MAX_TOTAL_PREPRINTS_PER_RUN:
-            print("\n⏹️ 已达到本次运行预印本入库上限: {}".format(MAX_TOTAL_PREPRINTS_PER_RUN))
-            break
-
-        feed_tag = source_info.get("tag", "preprint")
-        entry_type = source_info.get("type", "paper")
-
-        if source_name in EXCLUDED_FEED_NAMES:
-            print("\n⏭️ 跳过 API 来源: {}，如需启用请从 EXCLUDED_FEED_NAMES 中移除".format(source_name))
-            continue
-
-        if feed_tag in EXCLUDED_FEED_TAGS:
-            print("\n⏭️ 跳过 API 来源: {} [{}]".format(source_name, feed_tag))
-            continue
-
-        print("\n📡 正在扫描 API 来源: {} [{} / {}] ...".format(source_name, feed_tag, entry_type), end="")
-
-        try:
-            api_entries = fetch_api_entries(source_info, today_dt)
-            print(f" [✅ 获取成功，发现 {len(api_entries)} 条记录]")
-
-            for entry in api_entries[:MAX_ENTRIES_PER_API_SOURCE]:
-                inserted = process_entry(
-                    entry=entry,
-                    source_name=source_name,
-                    feed_tag=feed_tag,
-                    entry_type=entry_type,
-                    today=today,
-                    seen_paper_ids=seen_paper_ids,
-                    counters=counters,
-                )
-
-                if inserted and feed_tag == "preprint":
-                    counters["preprint_new"] += 1
-                    if counters["preprint_new"] >= MAX_TOTAL_PREPRINTS_PER_RUN:
-                        print("   ⏹️ 已达到本次运行预印本入库上限: {}".format(MAX_TOTAL_PREPRINTS_PER_RUN))
-                        break
-
-            # 避免连续请求 preprint API 过快。
-            time.sleep(0.5)
-
-        except Exception as e:
-            print(f"\n⚠️ API 源解析出错: {source_name}, 错误: {e}")
-            counters["feed_error"] += 1
-            continue
-
-    print("\n================= 今日抓取完成 =================")
-    print(f"✅ 新增论文 / 动态: {counters['new']}")
-    if DIAGNOSE_ONLY:
-        print(f"🟢 诊断模式本来会入库: {counters.get('would_insert', 0)}")
-    print(f"💨 已存在 / 重复跳过: {counters['skipped_existing']}")
-    print(f"🔎 关键词不匹配跳过: {counters['skipped_keyword']}")
-    print(f"⚠️ 单篇错误跳过: {counters['skipped_error']}")
-    print(f"📡 RSS/API 源错误: {counters['feed_error']}")
-    print(f"🧪 其中预印本新增: {counters.get('preprint_new', 0)}")
-    print("================================================")
+    print("\n" + "=" * 76)
+    print("今日抓取完成")
+    print_source_stats("TOTAL", totals)
+    print("=" * 76)
 
 
 if __name__ == "__main__":
