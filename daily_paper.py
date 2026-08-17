@@ -117,7 +117,7 @@ JOURNALS: dict[str, tuple[str, ...]] = {
     "Science Advances": ("2375-2548",),
     "Advanced Science": ("2198-3844",),
     "Proceedings of the National Academy of Sciences": ("0027-8424", "1091-6490"),
-    "Angewandte Chemie International Edition": ("1433-7851", "1521-3773"),
+    #"Angewandte Chemie International Edition": ("1433-7851", "1521-3773"),
     "Chemical Science": ("2041-6520", "2041-6539"),
     "Chemical Society Reviews": ("0306-0012", "1460-4744"),
 
