@@ -269,8 +269,9 @@ COMPOUND_KEYWORD_PATTERNS = {
         r"\b(?:design(?:s|ed|ing)?|generat(?:e[sd]?|ing|ion|ive)|"
         r"optimi[sz](?:e[sd]?|ing|ation))\b",
         r"\b(?:ai|artificial intelligence|(?:machine|deep|reinforcement)[ -]learning|"
-        r"generative|(?:large )?language models?|diffusion models?|flow matching|"
-        r"neural networks?|transformers?)\b",
+        r"generative|(?:large )?language models?|"
+        r"diffusion(?: models?|[- ](?:based|guided|driven))|flow matching|"
+        r"neural[- ]networks?|transformers?)\b",
     ),
 }
 
