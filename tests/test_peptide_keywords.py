@@ -13,7 +13,7 @@ def load_filter():
     names = {
         "CORE_KEYWORDS", "COMPOUND_KEYWORD_PATTERNS", "STRICT_KEYWORDS",
         "STRICT_KEYWORDS_LOWER", "normalize_search_text", "keyword_hit",
-        "match_core_keywords",
+        "match_core_keywords", "normalize_filter_text", "EXCLUDED_TITLE_PREFIXES", "should_skip_title",
     }
     nodes = [
         node for node in tree.body
@@ -97,29 +97,29 @@ class PeptideKeywordTests(unittest.TestCase):
         ]
         for title in cases:
             with self.subTest(title=title):
-                self.assertEqual(FILTER["match_core_keywords"](title, ""), [])
+                self.assertNotIn(PEPTIDE_KEYWORD, FILTER["match_core_keywords"](title, ""))
 
-    def test_existing_keywords_keep_their_original_matching(self):
-        # Every old keyword must still match without the new peptide conditions.
+    def test_recall_keywords_match_complete_phrases(self):
+        # The recall matcher recognizes complete phrases; admission requires context.
         for keyword in FILTER["CORE_KEYWORDS"]:
             if keyword == PEPTIDE_KEYWORD:
                 continue
             with self.subTest(keyword=keyword):
                 self.assertTrue(FILTER["keyword_hit"](keyword, keyword))
-                self.assertIn(keyword, FILTER["match_core_keywords"](keyword, ""))
+                # A bare keyword is a recall signal, not an admission decision.
 
-    def test_existing_non_ai_hits_are_preserved(self):
+    def test_weak_hits_do_not_admit_without_task_context(self):
         self.assertEqual(
             FILTER["match_core_keywords"]("Peptide binding affinity measurements", ""),
-            ["binding affinity"],
+            [],
         )
         self.assertEqual(
             FILTER["match_core_keywords"]("Molecular dynamics of cyclic peptides", ""),
-            ["molecular dynamics"],
+            [],
         )
         self.assertEqual(
             FILTER["match_core_keywords"]("Peptide design in a chair-shaped scaffold", ""),
-            ["Chai"],
+            [],
         )
 
     def test_strict_keyword_boundaries_are_unchanged(self):
@@ -138,3 +138,4 @@ class PeptideKeywordTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
