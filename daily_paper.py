@@ -9,8 +9,8 @@ AIDD Daily Paper Bot
 1. 只抓取固定白名单期刊、bioRxiv 和 ChemRxiv；
 2. 正式期刊统一通过 Crossref API 按 ISSN 获取最近注册的文章，
    因而不依赖各出版社不稳定的 RSS/ASAP 页面结构；
-3. 核心候选词命中后按任务与上下文筛选；
-4. 使用明确任务规则与有条件的弱词；不使用打分；
+3. 只收 AI 方法直接用于药物发现、分子设计或治疗性蛋白/多肽设计的论文；
+4. AI 方法 + 药物任务 + 主要贡献关联；不使用打分或分层；
 5. DOI / URL / 标题查重后，用 DeepSeek 生成中文摘要并写入 Notion；
 6. DIAGNOSE_ONLY=1 时只诊断，不调用 DeepSeek、不查询或写入 Notion。
 
@@ -131,135 +131,67 @@ JOURNALS: dict[str, tuple[str, ...]] = {
 # 核心关键词
 # ============================================================
 
-# 候选召回词；最终入库由 match_core_keywords 的任务条件决定。
+# 只保留药物发现/设计任务词；AI 方法证据与任务上下文必须同时满足。
+# MD、力场、电子密度、cryo-EM、通用几何学习、模型名均不独立召回。
 CORE_KEYWORDS = [
-    # AIDD / 计算机辅助药物设计
-    "drug discovery",
-    "drug design",
-    "ai drug discovery",
-    "ai-driven drug discovery",
-    "artificial intelligence for drug discovery",
-    "machine learning for drug discovery",
-    "deep learning for drug discovery",
-    "AIDD",
-    "computer-aided drug design",
-    "computer aided drug design",
-    "CADD",
-    "structure-based drug design",
-    "structure based drug design",
-    "SBDD",
-    "ligand-based drug design",
-    "ligand based drug design",
-    "in silico drug design",
-    "molecular design",
-    "molecule design",
-    "small-molecule design",
-    "small molecule design",
-    "de novo drug design",
-    "de novo molecular design",
-    "lead optimization",
-    "hit discovery",
-    "medicinal chemistry",
-    "cheminformatics",
-
-    # 分子生成与优化
-    "molecular generation",
-    "molecule generation",
-    "molecular generative",
-    "generative molecular",
-    "de novo molecule generation",
-    "de novo molecular generation",
-    "3d molecular generation",
-    "3d molecule generation",
-    "structure-based molecular generation",
-    "structure based molecular generation",
-    "pocket-conditioned",
-    "pocket conditioned",
-    "molecular optimization",
-    "molecule optimization",
+    "drug discovery", "drug design", "AIDD",
+    "de novo drug design", "lead optimization", "hit discovery",
+    "molecular design", "molecule design",
+    "molecular generation", "molecule generation", "molecular generative",
+    "generative molecular", "de novo molecular generation",
+    "3d molecular generation", "pocket-conditioned",
+    "molecular optimization", "molecule optimization",
+    "molecular property prediction", "molecular representation learning",
     "molecular foundation model",
-
-    # 蛋白–配体、口袋与虚拟筛选
-    "protein-ligand",
-    "protein ligand",
-    "protein–ligand",
-    "ligand-protein",
-    "ligand protein",
-    "protein–small molecule",
-    "protein-small molecule",
-    "protein small molecule",
-    "protein-ligand complex",
-    "protein ligand complex",
-    "binding pocket",
-    "binding site",
-    "binding affinity",
-    "binding mode",
-    "molecular docking",
-    "docking",
-    "virtual screening",
-    "structure-based virtual screening",
-    "structure based virtual screening",
-    "scoring function",
-    "interaction fingerprint",
-    "pharmacophore",
-
-    # 计算化学与性质预测
-    "molecular dynamics",
-    "binding free energy",
-    "free energy perturbation",
-    "alchemical free energy",
-    "FEP",
-    "ADMET",
-    "QSAR",
-    "molecular property prediction",
-    "activity prediction",
-    "force field",
-    "conformation generation",
-    "conformer generation",
-    "molecular representation learning",
-
-    # 三维与几何学习
-    "3d molecule",
-    "3d molecular",
-    "geometric deep learning",
-    "equivariant neural network",
-    "equivariant graph",
-    "SE(3)",
-    "E(3)",
-    "molecular diffusion model",
-    "diffusion model for molecular generation",
-    "flow matching for molecular",
-    "molecular flow matching",
-    "Bayesian flow network",
-    "BFN",
-    "molecular graph neural network",
-    "molecular graph transformer",
-
-    # 蛋白设计与结构生物学
-    "protein design",
-    "protein generation",
-    "protein language model",
-    "protein foundation model",
-    "protein structure prediction",
-    "protein folding",
-    "inverse folding",
-    "AlphaFold",
-    "RFdiffusion",
-    "RoseTTAFold",
-    "ESM",
-    "Boltz",
-    "Chai",
-    "cryo-EM",
-    "electron density",
-    "electron cloud",
-    "density map",
-    "X-ray crystallography",
-    "X ray crystallography",
-    "macromolecular crystallography",
-
-    # AI 多肽设计：入库还要求标题任务或句内方法与设计对象关联。
+    "protein-ligand", "binding affinity", "binding pose",
+    "drug-target affinity", "drug-target interaction",
+    "molecular docking", "virtual screening",
+    "ADMET", "ADME", "QSAR", "activity prediction", "toxicity prediction",
+    "protein design", "protein generation", "antibody design",
+    "nanobody design", "binder design", "inverse folding",
     "AI peptide design",
 ]
+
+# AI 证据不是入库白名单：模型名只能与药物任务关联使用。
+AI_METHOD_PATTERN = (
+    r"\b(?:ai|aidd|artificial intelligence|(?:machine|deep|reinforcement|contrastive)[ -]learning|"
+    r"neural[ -]networks?|(?:large |protein )?language models?|llms?|"
+    r"generative(?: models?| ai| architectures?)?|diffusion[ -](?:models?|based|guided)|"
+    r"transformers?|flow matching|bayesian flow networks?|bfns?|"
+    r"graph(?:[ -]neural)?[ -]networks?|gnns?|"
+    r"mixture[ -]of[ -]experts|moe|embeddings?|fusion networks?|"
+    r"random forests?|gradient boosting|xgboost|"
+    r"proteinmpnn|rfdiffusion(?:aa|[ -]?\d+)?|"
+    r"alphafold(?:[ -]?\d+|[ -]?multimer)?|boltz(?:[ -]?\d+)?|"
+    r"chai(?:[ -]?\d+)?|esm(?:[ -]?\d+|fold)?)\b"
+)
+DRUG_CONTEXT_PATTERN = (
+    r"\b(?:drugs?|drug[ -]like|medicinal|therapeutics?|therapeutic|"
+    r"biopharmaceuticals?|biologics|antibodies|antibody|nanobodies|nanobody|vhh|v h h|"
+    r"ligands?|inhibitors?|binding pockets?|protein[ -]ligand|"
+    r"target[ -](?:specific|guided)|(?:peptide|protein)[ -]binders?|"
+    r"antimicrobial|antiviral|anticancer|antioxidant|"
+    r"admet|adme|qsar|bioactivity|bioavailability|pharmacokinetic|"
+    r"solubility|lipophilicity|cardiotoxicity|hepatotoxicity|hERG|lytac)\b"
+)
+OUT_OF_SCOPE_TITLE_PATTERN = (
+    r"\b(?:materials?|polymers?|hydrogels?|biosensors?|zeolites?|perovskites?|"
+    r"electrolytes?|batter(?:y|ies)|photocurrent|photovoltaic|"
+    r"carbon capture|singlet fission|taste|odor|flavor|"
+    r"nanopore translocation|self[ -]assembl\w*|"
+    r"watermark\w*|enzyme engineering|peptide synthetases|"
+    r"specimen preparation|ice thickness)\b"
+)
+CONTRIBUTION_PATTERN = (
+    r"\b(?:we|our|here|this (?:work|study|paper|review)|"
+    r"(?:a|an|the) .{0,60}(?:model|framework|network|platform)|"
+    r"propos\w*|develop\w*|introduc\w*|train\w*|fine[ -]?tun\w*|"
+    r"benchmark\w*|evaluat\w*|assess\w*|integrat\w*)\b"
+)
+ADJACENT_TITLE_PATTERN = (
+    r"\belectron density\b|\bcryo[ -]?em\b|\bforce[ -]field\b|"
+    r"\bmolecular dynamics\b|^mechanisms? of\b|^structures? of\b"
+)
 
 # 复合词的候选匹配；最终入库仍须满足 match_core_keywords 的任务条件。
 COMPOUND_KEYWORD_PATTERNS = {
@@ -273,12 +205,6 @@ COMPOUND_KEYWORD_PATTERNS = {
         r"neural[- ]networks?|transformers?)\b",
     ),
 }
-
-STRICT_KEYWORDS = {
-    "AIDD", "CADD", "SBDD", "FEP", "ADMET", "QSAR",
-    "SE(3)", "E(3)", "BFN", "ESM",
-}
-STRICT_KEYWORDS_LOWER = {word.lower() for word in STRICT_KEYWORDS}
 
 # 不入库的内容类型。
 EXCLUDED_TITLE_PREFIXES = (
@@ -402,127 +328,76 @@ def keyword_hit(text: str, keyword: str) -> bool:
     return re.search(r"(?<![a-z0-9])" + pattern + r"(?![a-z0-9])", text) is not None
 
 
+def aidd_task_label(text: str) -> str:
+    """Identify a drug-design task, never generic structure/MD/material modeling."""
+    design = re.search(r"\b(?:design\w*|generat\w*|optimi[sz]\w*|discover\w*)\b", text)
+    prediction = re.search(
+        r"\b(?:predict\w*|modeling|modelling|classif\w*|screen\w*|"
+        r"benchmark\w*|evaluat\w*|assess\w*|discover\w*|co[ -]?fold\w*|prioriti[sz]\w*)\b", text)
+    if re.search(r"\bdrug[ -](?:discovery|design)\b", text):
+        return "AI drug discovery/design"
+    if design and re.search(r"\b(?:molecul\w*|drug[ -]like|compounds?|ligands?)\b", text):
+        return "AI molecular design"
+    if re.search(r"\b(?:molecular docking|virtual screening|binding pocket|"
+                 r"drug[ -]target|protein[ -]ligand|binding affinity|binding poses?)\b", text):
+        if prediction or re.search(r"\bdocking\b", text):
+            return "AI drug screening/binding prediction"
+    if prediction and re.search(
+            r"\b(?:admet|adme|qsar|molecular propert\w*|toxicity|"
+            r"bioactivity|potency|selectivity|solubility|lipophilicity|"
+            r"pharmacokinetic\w*)\b", text):
+        return "AI drug property prediction"
+    if re.search(r"\b(?:proteins?|peptides?|antibodies|antibody|"
+                 r"nanobodies|nanobody|vhh|v h h|binders?|lytac)\b", text):
+        if design or re.search(r"\binverse folding\b", text):
+            return "AI biologic design"
+        if prediction and re.search(
+                r"\b(?:activity|antioxidant|affinity|thermostability|"
+                r"stability|toxicity|selectivity)\b", text):
+            return "AI biologic property prediction"
+    return ""
+
+
 def match_core_keywords(title: str, abstract: str) -> list[str]:
+    """One admission rule: AI method + drug task, linked to the main contribution."""
     title_text = normalize_filter_text(title)
     text = normalize_filter_text(f"{title} {abstract}")
-    matched = [k for k in CORE_KEYWORDS if k != "AI peptide design" and keyword_hit(text, k)]
-    # Auxiliary evidence may rescue papers missed by the old recall vocabulary.
-    bio = re.search(r"\b(?:proteins?|peptides?|ligands?|receptors?|enzymes?|"
-                    r"drugs?|drug-like|therapeutic|bioactivity|admet|qsar|"
-                    r"binding pockets?|binding sites?|inhibitors?|lytac)\b", text)
-    ai = re.search(r"\b(?:ai|artificial intelligence|machine[ -]learning|"
-                   r"deep[ -]learning|reinforcement[ -]learning|flow matching|neural[ -]networks?|language models?|"
-                   r"generative|diffusion|transformer|proteinmpnn|rfdiffusion)\b", text)
-    biological_design_title = re.search(
-        r"\b(?:protein|peptide|drug)[ -](?:design|generation)\b|"
-        r"\b(?:design|generat)\w*\b.{0,60}\b(?:proteins?|peptides?)\b", title_text)
-    if not biological_design_title and re.search(r"\b(?:zeolite|electrolytes?|batter(?:y|ies)|photocurrent|"
-                 r"carbon capture|singlet fission|taste|odor|flavor|"
-                 r"nanopore translocation)\b", title_text):
+    if re.search(OUT_OF_SCOPE_TITLE_PATTERN, title_text):
         return []
-    # Explicit generation/representation/prediction tasks; not generic drug discovery.
-    strong = (
-        "molecular generation", "molecule generation", "molecular generative",
-        "generative molecular", "pocket-conditioned", "molecular optimization",
-        "molecular representation learning", "molecular property prediction",
-        "molecular foundation model", "protein language model",
-        "protein foundation model", "inverse folding", "QSAR", "ADMET",
-    )
-    property_method = keyword_hit(title_text, "molecular property prediction") and ai
-    if (bio or property_method) and any(keyword_hit(text, k) for k in strong):
-        return matched or ["task: molecular/protein modeling"]
-    # Design + AI must refer to a biological object, not AI materials chemistry.
-    object_design = re.search(
-        r"\b(?:protein|peptide|molecular|molecule|drug)[ -](?:design|generation|optimi[sz]ation)\b|"
-        r"\b(?:design|generat|optimi[sz])\w*\b.{0,70}\b(?:proteins?|peptides?|drug-like molecules)\b|"
-        r"\b(?:proteinmpnn|rfdiffusion(?:aa|[ -]?\d+)?)\b", text)
-    units = [title_text] + re.split(r"[.!?;]\s+", normalize_filter_text(abstract))
-    design_in_ai_unit = any(
-        re.search(r"\b(?:ai|artificial intelligence|machine[ -]learning|"
-                  r"deep[ -]learning|language models?|generative|diffusion|neural|proteinmpnn|rfdiffusion)\b", u)
-        and re.search(r"\b(?:protein|peptide|molecular|molecule|drug)[ -]"
-                      r"(?:design|generation|optimi[sz]ation)\b|"
-                      r"\b(?:design|generat|optimi[sz])\w*\b.{0,70}"
-                      r"\b(?:proteins?|peptides?|drug-like molecules|lytac)\b|"
-                      r"\b(?:proteinmpnn|rfdiffusion(?:aa|[ -]?\d+)?)\b", u)
-        for u in units)
-    peptide_task_title = re.search(
-        r"\bpeptide[ -](?:design|generation|optimi[sz]ation)\b|"
-        r"\b(?:design|generat|optimi[sz])\w*\b.{0,60}\bpeptides?\b|"
-        r"\bpeptides?\b.{0,20}\b(?:design|generat|optimi[sz])\w*\b", title_text)
-    if bio and ai and peptide_task_title:
-        return matched + ["AI peptide design"]
-    if bio and ai and object_design and design_in_ai_unit:
-        if re.search(r"\bpeptides?\b", text):
-            return matched + ["AI peptide design"]
-        return matched or ["task: AI biological design"]
-    if bio and keyword_hit(text, "RFdiffusion") and re.search(
-            r"\b(?:protein design|binder design|design of.*proteins?)\b", title_text):
-        return matched or ["task: AI protein design"]
-    if bio and re.search(r"\bai[ -]designed\b", title_text) and re.search(
-            r"\b(?:proteins?|peptides?|lytac|binders?)\b", title_text):
-        return matched or ["task: AI biological design (title)"]
-    # Named co-folding models must be tied to the modeling task.
-    models = any(keyword_hit(text, k) for k in ("Boltz", "Chai", "AlphaFold", "ESM"))
-    model_task_title = re.search(
-        r"\b(?:co[ -]?folding|fine[ -]?tun\w*|prediction|benchmark\w*|"
-        r"structural errors|structural prioritization)\b", title_text)
-    if bio and models and model_task_title and re.search(
-            r"\b(?:co[ -]?folding|fine[ -]?tun\w*|structure prediction|"
-            r"binding pose|affinity prediction|benchmark\w*|structural errors)\b", text):
-        return matched or ["task: structure model"]
-    # CADD: keep as adjacent coverage, not as evidence that the paper uses AI.
-    if bio and any(keyword_hit(text, k) for k in (
-            "computer-aided drug design", "CADD", "SBDD", "in silico drug design")):
-        return matched or ["task: CADD"]
-    if bio and re.search(
-            r"\b(?:contrastive learning|multimodal ai|generative|"
-            r"machine[ -]learning|deep[ -]learning)\b", title_text) and re.search(
-            r"\b(?:drug design|drug discovery|molecular design)\b", title_text):
-        return matched or ["task: AI drug design"]
-    if bio and ai and re.search(r"\btoxicity\b", title_text):
-        return matched or ["task: toxicity modeling"]
-    if bio and ai and re.search(
-            r"\b(?:artificial intelligence|learning|language models?)\b", title_text) and re.search(
-            r"\b(?:antioxidant|thermostability|selectivity|activity|adme)\b", title_text):
-        return matched or ["task: biomolecular property modeling"]
-    # Method contribution in the title prevents an incidental docking mention
-    # in a mechanism paper from becoming an admission criterion.
-    method_title = re.search(
-        r"\b(?:framework|platform|workflow|pipeline|benchmark\w*|database|"
-        r"prediction|modeling|modelling|mapping|discovery|refinement|"
-        r"generation|sampling|training|evaluation|generalizability|design|analysis|tool|paths|elaboration)\b", title_text)
-    experiment_title = re.search(
-        r"\b(?:alleviates?|attenuates?|suppresses?|protects?|"
-        r"mechanisms?|specimen preparation|ice thickness|"
-        r"structures? of|reveals?|responses? to|biological evaluation)\b", title_text)
-    if not bio or not method_title or experiment_title:
+    if not re.search(DRUG_CONTEXT_PATTERN, text):
         return []
-    # Pocket/ligand methods, affinity data, and synthesis-aware elaboration.
-    ligand_method = any(keyword_hit(text, k) for k in (
-        "binding pocket", "binding site", "protein-ligand", "binding affinity",
-        "molecular docking", "docking", "virtual screening"))
-    computational = re.search(
-        r"\b(?:computational|algorithm\w*|automated|open-source|software|"
-        r"markov state|conformational ensemble|fragment elaboration|"
-        r"databases?|neural\w*|machine[ -]learning|benchmark\w*|ai system)\b", text)
-    if re.search(r"\bfragment elaboration\b", title_text) and ligand_method:
-        return matched or ["task: synthesis-aware ligand design"]
-    if re.search(r"\bmatched (?:molecule|molecular) pair\b", title_text) and bio:
-        return matched or ["task: cheminformatics"]
-    if ligand_method and computational:
-        return matched or ["task: ligand/pocket method"]
-    # Computational reconstruction/refinement is allowed even without AI.
-    structural = any(keyword_hit(text, k) for k in (
-        "cryo-EM", "electron density", "density map", "X-ray crystallography"))
-    if structural and re.search(
-            r"\b(?:reconstruction|refinement|modeling|modelling)\b", title_text):
-        return matched or ["task: structural modeling"]
-    # Biomolecular force-field/sampling methods, not all MD applications.
-    if any(keyword_hit(text, k) for k in ("force field", "molecular dynamics")) and re.search(
-            r"\b(?:force[ -]field|sampling|water model)\b", title_text):
-        return matched or ["task: biomolecular simulation method"]
-    return []
+    title_task = aidd_task_label(title_text)
+    if (re.search(ADJACENT_TITLE_PATTERN, title_text)
+            and not (title_task and re.search(AI_METHOD_PATTERN, title_text))):
+        return []
+    units = re.split(r"[.!?;]\s+", normalize_filter_text(abstract))
+    # An explicit AI drug task in the title is sufficient. Otherwise require
+    # evidence in a contribution sentence, rather than incidental background AI.
+    admitted_task = ""
+    if title_task and re.search(AI_METHOD_PATTERN, title_text):
+        admitted_task = title_task
+    else:
+        for unit in units:
+            if re.search(OUT_OF_SCOPE_TITLE_PATTERN, unit):
+                continue
+            if not re.search(AI_METHOD_PATTERN, unit):
+                continue
+            if not re.search(CONTRIBUTION_PATTERN, unit):
+                continue
+            unit_task = aidd_task_label(unit)
+            if unit_task or title_task:
+                admitted_task = unit_task or title_task
+                break
+    if not admitted_task:
+        return []
+    matched = [
+        k for k in CORE_KEYWORDS
+        if k != "AI peptide design" and keyword_hit(text, k)
+    ]
+    if admitted_task == "AI biologic design" and re.search(r"\bpeptides?\b", text):
+        matched.append("AI peptide design")
+    return matched or [admitted_task]
+
 
 def should_skip_title(title: str) -> bool:
     normalized = normalize_search_text(title)
@@ -1222,7 +1097,7 @@ def run() -> None:
     print("=" * 76)
     print("🚀 AIDD Daily Paper Bot")
     print(f"日期窗口: {start_text} 至 {end_text}")
-    print("筛选规则: 明确任务或候选词 + 生物分子计算上下文")
+    print("筛选规则: AI 方法 + 药物发现/设计任务 + 主要贡献关联")
     print(f"诊断模式: {DIAGNOSE_ONLY}")
     print("=" * 76)
 

@@ -14,6 +14,9 @@ def load_filter():
         "CORE_KEYWORDS", "COMPOUND_KEYWORD_PATTERNS", "STRICT_KEYWORDS",
         "STRICT_KEYWORDS_LOWER", "normalize_search_text", "keyword_hit",
         "match_core_keywords", "normalize_filter_text", "EXCLUDED_TITLE_PREFIXES", "should_skip_title",
+        "aidd_task_label", "AI_METHOD_PATTERN", "DRUG_CONTEXT_PATTERN",
+        "OUT_OF_SCOPE_TITLE_PATTERN", "CONTRIBUTION_PATTERN",
+        "ADJACENT_TITLE_PATTERN",
     }
     nodes = [
         node for node in tree.body
@@ -58,13 +61,14 @@ class PeptideKeywordTests(unittest.TestCase):
         ]
         for title in cases:
             with self.subTest(title=title):
-                self.assertIn(PEPTIDE_KEYWORD, FILTER["match_core_keywords"](title, ""))
+                self.assertIn(PEPTIDE_KEYWORD, FILTER["match_core_keywords"](
+                    title, "The designed peptides are therapeutic candidates."))
 
     def test_title_and_abstract_are_combined(self):
         self.assertEqual(
             FILTER["match_core_keywords"](
                 "Optimization of cyclic peptides",
-                "A deep learning model proposes improved sequences.",
+                "A deep learning model proposes improved therapeutic sequences.",
             ),
             [PEPTIDE_KEYWORD],
         )
@@ -130,7 +134,7 @@ class PeptideKeywordTests(unittest.TestCase):
     def test_compound_keyword_is_not_duplicated(self):
         self.assertEqual(
             FILTER["match_core_keywords"](
-                "AI peptide design", "AI peptide design and generative peptide optimization"
+                "AI peptide design", "AI peptide design and generative peptide optimization for therapeutics"
             ),
             [PEPTIDE_KEYWORD],
         )
@@ -138,4 +142,3 @@ class PeptideKeywordTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

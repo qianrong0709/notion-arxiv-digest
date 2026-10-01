@@ -9,7 +9,7 @@ from test_peptide_keywords import FILTER
 
 class ScopeFilterTests(unittest.TestCase):
     def test_audited_paper_scope(self):
-        """Protect 37 recent false positives and 42 relevant/adjacent papers."""
+        """Replay 79 audited papers against the narrowed AI drug-design scope."""
         fixtures = Path(__file__).with_name("scope_regression_cases.json")
         for case in json.loads(fixtures.read_text(encoding="utf-8")):
             with self.subTest(doi=case["doi"], title=case["title"]):
@@ -54,18 +54,63 @@ class ScopeFilterTests(unittest.TestCase):
             with self.subTest(title=title):
                 self.assertEqual(FILTER["match_core_keywords"](title, abstract), [])
 
-    def test_validated_design_and_structural_methods_remain_in_scope(self):
+    def test_ai_drug_design_and_experimental_validation_remain_in_scope(self):
         cases = [
-            ("Diffusion-based peptide design", "Candidates were validated in mice."),
+            ("Diffusion-based therapeutic peptide design", "Candidates were validated in mice."),
             ("Boltz-2 co-folding benchmark for protein-ligand binding poses", ""),
             ("Chai-1 protein-ligand structure prediction", ""),
-            ("Protein electron density reconstruction framework", "A neural network reconstructs cryo-EM density maps."),
-            ("Protein ensemble refinement by integer programming", "We optimize protein conformers fitted to electron density."),
-            ("AI protein design for battery-powered biosensors", "We generate proteins with a neural network."),
+            ("AI antibody design", "Candidates were experimentally validated."),
         ]
         for title, abstract in cases:
             with self.subTest(title=title):
                 self.assertTrue(FILTER["match_core_keywords"](title, abstract))
+
+    def test_adjacent_methods_and_materials_are_now_excluded(self):
+        cases = [
+            ("Protein electron density reconstruction framework", "A neural network reconstructs cryo-EM density maps for drug discovery."),
+            ("Protein ensemble refinement by integer programming", "We optimize protein conformers fitted to electron density."),
+            ("AI protein design for battery-powered biosensors", "We generate proteins with a neural network."),
+            ("Machine learning designs molecular materials", "We generate inhibitors for batteries using a neural network."),
+            ("Computer-aided drug design for diabetes", "We use docking and molecular dynamics to screen inhibitors."),
+            ("Force field training for drug-like molecules", "We develop a neural network force field."),
+            ("Generative design of self-assembling therapeutic peptide hydrogels", "We develop a diffusion model for biomaterials."),
+            ("Protein language models for structure prediction", "Drug discovery may benefit from these models."),
+        ]
+        for title, abstract in cases:
+            with self.subTest(title=title):
+                self.assertEqual(FILTER["match_core_keywords"](title, abstract), [])
+
+    def test_background_ai_does_not_admit_experimental_work(self):
+        cases = [
+            ("Drug discovery by biochemical screening", "Machine learning is widely used in drug discovery. Here we develop an experimental assay for inhibitors."),
+            ("Drug discovery by docking", "AI drug design is promising. We use molecular dynamics to select compounds."),
+            ("Mechanism of a therapeutic peptide", "We use AlphaFold to predict the peptide structure and measure activity."),
+            ("Online molecular docking tool", "We use ChatGPT for workflow guidance and explain docking results."),
+        ]
+        for title, abstract in cases:
+            with self.subTest(title=title):
+                self.assertEqual(FILTER["match_core_keywords"](title, abstract), [])
+
+    def test_background_drug_mentions_do_not_admit_unrelated_ai(self):
+        self.assertEqual(FILTER["match_core_keywords"](
+            "Protein mechanism study",
+            "Drug design is a potential application. We develop a neural network to reconstruct electron density."), [])
+
+    def test_drug_design_evidence_can_be_in_the_abstract(self):
+        self.assertTrue(FILTER["match_core_keywords"](
+            "A new approach to scaffold optimization",
+            "Here we develop a diffusion model for molecular generation of drug-like inhibitors."))
+
+    def test_generic_design_requires_drug_context(self):
+        for title in ("AI protein design", "Generative molecular design", "AI peptide design"):
+            with self.subTest(title=title):
+                self.assertEqual(FILTER["match_core_keywords"](title, ""), [])
+
+    def test_weak_recall_terms_have_been_removed(self):
+        removed = {"molecular dynamics", "binding site", "cryo-EM", "electron density",
+                   "electron cloud", "density map", "X-ray crystallography", "force field",
+                   "CADD", "SBDD", "FEP", "SE(3)", "E(3)", "BFN", "Chai", "Boltz"}
+        self.assertTrue(removed.isdisjoint(FILTER["CORE_KEYWORDS"]))
 
     def test_corrections_are_excluded(self):
         for title in (
