@@ -257,7 +257,23 @@ CORE_KEYWORDS = [
     "X-ray crystallography",
     "X ray crystallography",
     "macromolecular crystallography",
+
+    # AI 多肽设计：组合匹配见下方，不单独收录普通多肽生物学研究。
+    "AI peptide design",
 ]
+
+# 组合关键词要求各组在标题 + 摘要中同时命中；其余关键词规则保持不变。
+COMPOUND_KEYWORD_PATTERNS = {
+    "ai peptide design": (
+        r"\bpeptides?\b",
+        r"\b(?:design(?:s|ed|ing)?|generat(?:e[sd]?|ing|ion|ive)|"
+        r"optimi[sz](?:e[sd]?|ing|ation))\b",
+        r"\b(?:ai|artificial intelligence|(?:machine|deep|reinforcement)[ -]learning|"
+        r"generative|(?:large )?language models?|"
+        r"diffusion(?: models?|[- ](?:based|guided|driven))|flow matching|"
+        r"neural[- ]networks?|transformers?)\b",
+    ),
+}
 
 STRICT_KEYWORDS = {
     "AIDD", "CADD", "SBDD", "FEP", "ADMET", "QSAR",
@@ -360,6 +376,12 @@ def normalize_title(title: str) -> str:
 def keyword_hit(text: str, keyword: str) -> bool:
     normalized_text = normalize_search_text(text)
     normalized_keyword = normalize_search_text(keyword)
+
+    if normalized_keyword in COMPOUND_KEYWORD_PATTERNS:
+        return all(
+            re.search(pattern, normalized_text) is not None
+            for pattern in COMPOUND_KEYWORD_PATTERNS[normalized_keyword]
+        )
 
     if normalized_keyword in STRICT_KEYWORDS_LOWER:
         pattern = rf"(?<![a-z0-9]){re.escape(normalized_keyword)}(?![a-z0-9])"
