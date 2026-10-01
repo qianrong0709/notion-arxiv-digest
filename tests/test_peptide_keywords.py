@@ -44,6 +44,8 @@ class PeptideKeywordTests(unittest.TestCase):
             "Generative design of cyclic peptides",
             "Generative peptide optimization",
             "Diffusion models for macrocyclic peptide generation",
+            "Diffusion-based peptide design",
+            "Neural-network-guided peptide design",
             "Language models optimize therapeutic peptides",
             "Large language models for peptide optimisation",
             "Reinforcement learning designs peptides with improved selectivity",
