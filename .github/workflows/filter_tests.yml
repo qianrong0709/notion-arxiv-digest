@@ -1,0 +1,29 @@
+name: Paper scope filter tests
+
+on:
+  push:
+    paths:
+      - daily_paper.py
+      - tests/**
+      - .github/workflows/filter_tests.yml
+  pull_request:
+    paths:
+      - daily_paper.py
+      - tests/**
+      - .github/workflows/filter_tests.yml
+
+permissions:
+  contents: read
+
+jobs:
+  test_filters:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Check syntax and offline scope regressions
+        run: |
+          python -m py_compile daily_paper.py
+          python -m unittest discover -s tests -v
