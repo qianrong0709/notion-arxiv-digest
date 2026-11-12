@@ -1,6 +1,6 @@
 # AIDD Daily Paper Bot
 
-每天从固定期刊白名单、bioRxiv 和 ChemRxiv 获取候选论文，通过筛选和查重后，生成中文摘要并写入 Notion。
+每天通过 Crossref 查询白名单期刊，并从 bioRxiv 和 ChemRxiv 获取预印本。候选论文经筛选和查重后，生成中文摘要并写入 Notion。
 
 ## 论文范围
 
@@ -25,7 +25,9 @@ AI 设计论文包含化学合成、细胞或动物实验验证，仍可入库�
 
 ## 来源和查重
 
-正式期刊通过 Crossref 按 ISSN 查询；白名单仍为代码中的 21 本期刊。另查询 bioRxiv、ChemRxiv；未接入 arXiv。每次回看 4 天，两个预印本平台每次各最多新增 5 篇。更正、撤稿等内容跳过，按 DOI、URL、标题查重。
+正式期刊通过 Crossref 按 ISSN 查询，覆盖代码中的 21 本白名单期刊。预印本来自 bioRxiv 和 ChemRxiv，每个平台每次最多新增 5 篇。目前未接入 arXiv。
+
+每次回看 4 天，跳过更正、撤稿等内容，按 DOI、URL 和标题查重。
 
 ## 离线验证
 
